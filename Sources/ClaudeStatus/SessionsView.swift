@@ -156,13 +156,13 @@ struct SessionsView: View {
     }
 
     /// Approve-pill green: plain systemGreen is too washed out against the
-    /// panel's near-white light-mode background, so light mode gets a deeper
-    /// forest green; dark mode keeps the brighter system green, which reads
-    /// well on dark.
+    /// panel's near-white light-mode background, but full forest green read
+    /// too rich — light mode sits halfway between the two. Dark mode keeps
+    /// the brighter system green, which reads well on dark.
     private static let approveGreen = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             ? .systemGreen
-            : NSColor(srgbRed: 0.11, green: 0.50, blue: 0.24, alpha: 1)
+            : NSColor(srgbRed: 0.16, green: 0.64, blue: 0.29, alpha: 1)
     })
 
     private func pendingSummary(_ approval: PendingApproval, in session: ClaudeSession) -> String {
