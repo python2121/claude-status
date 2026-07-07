@@ -137,7 +137,7 @@ enum SessionScanner {
     }
 
     /// Map the registry's status string to our state. Unknown/missing values
-    /// read as idle — never a false red.
+    /// read as idle — never a false alarm color.
     static func state(fromStatus status: String?) -> ClaudeSession.State {
         switch status {
         case "busy": return .busy

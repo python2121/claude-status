@@ -7,6 +7,23 @@ struct ClaudeStatusMain {
     private static let appDelegate = AppDelegate()
 
     static func main() {
+        // Hook helper mode: Claude Code's PermissionRequest hook pipes the
+        // request in on stdin; we relay it to the running app and print a
+        // verdict (or nothing — silence hands the prompt back to the
+        // terminal). Dispatched first: it must never touch the GUI, the
+        // single-instance lock, or block on anything but its own deadline.
+        if CommandLine.arguments.contains("--permission-hook") {
+            PermissionHook.run()
+        }
+
+        // Register / remove the PermissionRequest hook in ~/.claude/settings.json.
+        if CommandLine.arguments.contains("--install-hook") {
+            runHookInstaller(install: true)
+        }
+        if CommandLine.arguments.contains("--uninstall-hook") {
+            runHookInstaller(install: false)
+        }
+
         // Headless self-test mode: run the hand-rolled assertion suite and
         // exit, before NSApplication (or the single-instance lock) exists.
         if CommandLine.arguments.contains("--self-test") {
@@ -46,5 +63,19 @@ struct ClaudeStatusMain {
         app.delegate = appDelegate
         app.setActivationPolicy(.accessory)
         app.run()
+    }
+
+    private static func runHookInstaller(install: Bool) -> Never {
+        do {
+            let changed = install ? try HookInstaller.install() : try HookInstaller.uninstall()
+            let verb = install ? "installed in" : "removed from"
+            print(changed
+                ? "PermissionRequest hook \(verb) \(HookInstaller.settingsPath)"
+                : "Nothing to do — hook \(install ? "already present" : "not present") in \(HookInstaller.settingsPath)")
+            exit(0)
+        } catch {
+            FileHandle.standardError.write(Data("hook \(install ? "install" : "uninstall") failed: \(error.localizedDescription)\n".utf8))
+            exit(1)
+        }
     }
 }

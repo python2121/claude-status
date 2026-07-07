@@ -67,9 +67,10 @@ struct SessionsView: View {
     }
 
     private func row(for session: ClaudeSession) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+        let effectiveState = store.effectiveState(session)
+        return HStack(alignment: .top, spacing: 8) {
             Circle()
-                .fill(stateColor(session.state))
+                .fill(stateColor(effectiveState))
                 .frame(width: 8, height: 8)
                 .padding(.top, 5)
 
@@ -82,6 +83,12 @@ struct SessionsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if store.hasAutoApprove(session) {
+                        Image(systemName: "bolt.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.yellow)
+                            .help("Auto-approving permission requests for this session")
+                    }
                 }
                 Text(abbreviatedPath(session.cwd))
                     .font(.caption)
@@ -92,16 +99,63 @@ struct SessionsView: View {
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(stateText(session))
-                    .font(.callout)
-                    .foregroundStyle(stateColor(session.state))
-                Text(activityText(for: session))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+            // A pending permission request takes over the status area: the
+            // verdict buttons render exactly where the state text would be,
+            // with the command under them where the timing caption goes.
+            if let approval = store.firstPending(for: session) {
+                approvalControls(for: approval, in: session)
+            } else {
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(stateText(session))
+                        .font(.callout)
+                        .foregroundStyle(stateColor(session.state))
+                    Text(activityText(for: session))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
             }
         }
+    }
+
+    private func approvalControls(for approval: PendingApproval, in session: ClaudeSession) -> some View {
+        VStack(alignment: .trailing, spacing: 3) {
+            HStack(spacing: 4) {
+                Button("Approve") { store.approve(approval) }
+                    .controlSize(.small)
+                    .tint(.green)
+                Button("Deny") { store.deny(approval) }
+                    .controlSize(.small)
+                Menu {
+                    Button("Approve all for 5 minutes") {
+                        if let sid = session.sessionId {
+                            store.approveAll(sessionId: sid, rule: .until(Date().addingTimeInterval(300)))
+                        }
+                    }
+                    Button("Approve all for this session") {
+                        if let sid = session.sessionId {
+                            store.approveAll(sessionId: sid, rule: .forSession)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+            Text(pendingSummary(approval, in: session))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 200, alignment: .trailing)
+                .help(approval.summary)
+        }
+    }
+
+    private func pendingSummary(_ approval: PendingApproval, in session: ClaudeSession) -> String {
+        let more = store.pendingCount(for: session) - 1
+        return more > 0 ? "\(approval.summary) · +\(more) more" : approval.summary
     }
 
     private var footer: some View {
@@ -124,10 +178,10 @@ struct SessionsView: View {
 
     private func stateColor(_ state: ClaudeSession.State) -> Color {
         switch state {
-        case .busy: return .orange
+        case .busy: return .green
         case .shell: return .blue
         case .idle: return Color(nsColor: .secondaryLabelColor)
-        case .waitingForInput: return .red
+        case .waitingForInput: return .orange
         }
     }
 

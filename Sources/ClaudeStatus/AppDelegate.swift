@@ -53,7 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.target = self
-        statusItem.button?.action = #selector(togglePanel(_:))
+        statusItem.button?.action = #selector(statusItemClicked(_:))
+        // Right-click gets the context menu; left-click toggles the panel.
+        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         buildPanel()
 
@@ -163,6 +165,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Show / hide
 
+    @objc private func statusItemClicked(_ sender: Any?) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            showContextMenu()
+        } else {
+            togglePanel(sender)
+        }
+    }
+
+    /// Right-click menu mirroring the overlay's ⋯ options: a checkmark shows
+    /// the invert toggle's state; no other imagery. The menu is attached
+    /// only for the duration of the click (set → performClick → unset) — the
+    /// standard dance that keeps a persistent `statusItem.menu` from
+    /// hijacking left-clicks.
+    private func showContextMenu() {
+        if panel.isVisible { closePanel() }
+
+        let menu = NSMenu()
+        // Pin to the app's effective appearance so the menu always tracks
+        // the system light/dark theme instead of whatever the status bar
+        // window would hand it.
+        menu.appearance = NSApp.effectiveAppearance
+        let invert = NSMenuItem(
+            title: "Invert menu bar colors",
+            action: #selector(toggleInvertColors),
+            keyEquivalent: "")
+        invert.target = self
+        invert.state = store.invertMenubarColors ? .on : .off
+        menu.addItem(invert)
+        menu.addItem(.separator())
+        // Routed through our own selector rather than NSApplication
+        // .terminate(_:) — the system decorates recognized stock selectors
+        // (Quit included) with an automatic symbol image, and we want a
+        // text-only row.
+        let quit = NSMenuItem(
+            title: "Quit",
+            action: #selector(quitApp),
+            keyEquivalent: "")
+        quit.target = self
+        menu.addItem(quit)
+
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
+    }
+
+    @objc private func toggleInvertColors() {
+        store.invertMenubarColors.toggle()
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
+    }
+
     @objc private func togglePanel(_ sender: Any?) {
         if panel.isVisible {
             closePanel()
@@ -265,8 +320,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Menubar title
 
-    /// The session count: red when any session is waiting on the user, orange
-    /// while sessions are working, muted secondary at zero.
+    /// The session count: orange when any session is waiting on the user,
+    /// green while sessions are working, muted secondary at zero.
     private func updateStatusItemTitle() {
         guard let button = statusItem.button else { return }
         let label = store.menubarLabel
@@ -310,8 +365,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             fill.setFill()
             rect.fill()
 
-            // Black reads best on orange, but goes muddy on red — switch to
-            // white once the block is dark.
+            // Black reads best on the green/orange fills; the luma check
+            // switches to white if a fill ever goes dark.
             let textColor = Self.contrastingText(on: fill)
 
             let para = NSMutableParagraphStyle()
@@ -331,8 +386,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Black or white, whichever has more contrast against `fill`. Resolved
-    /// against the current drawing appearance (the fill is a dynamic color) and
-    /// keyed off perceived luminance, so the red end gets white text.
+    /// against the current drawing appearance (the fill is a dynamic color)
+    /// and keyed off perceived luminance.
     private static func contrastingText(on fill: NSColor) -> NSColor {
         guard let rgb = fill.usingColorSpace(.sRGB) else { return .black }
         // Rec. 601 luma — cheap and good enough for a "is this dark?" test.
