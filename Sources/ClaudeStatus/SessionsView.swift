@@ -1,0 +1,196 @@
+import SwiftUI
+
+struct SessionsView: View {
+    @ObservedObject var store: SessionStore
+    @State private var now: Date = Date()
+
+    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+
+            Divider()
+
+            if store.sessions.isEmpty {
+                emptyState
+            } else {
+                sessionRows
+            }
+
+            Divider()
+
+            footer
+        }
+        .padding(14)
+        .frame(width: 392, alignment: .leading)
+        .onReceive(tick) { now = $0 }
+    }
+
+    // MARK: Sections
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Claude Sessions")
+                .font(.headline)
+            Spacer()
+            Text(summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var summary: String {
+        if store.sessions.isEmpty { return "none running" }
+        var parts: [String] = []
+        if store.busyCount > 0 { parts.append("\(store.busyCount) working") }
+        if store.shellCount > 0 { parts.append("\(store.shellCount) in shell") }
+        if store.waitingCount > 0 { parts.append("\(store.waitingCount) waiting") }
+        if store.idleCount > 0 { parts.append("\(store.idleCount) idle") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var emptyState: some View {
+        Text("No Claude sessions running.")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 4)
+    }
+
+    private var sessionRows: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(store.sessions.enumerated()), id: \.element.id) { index, session in
+                if index > 0 { Divider() }
+                row(for: session)
+            }
+        }
+    }
+
+    private func row(for session: ClaudeSession) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle()
+                .fill(stateColor(session.state))
+                .frame(width: 8, height: 8)
+                .padding(.top, 5)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(session.projectName)
+                        .font(.system(size: 14, weight: .semibold))
+                    if let branch = session.gitBranch, !branch.isEmpty {
+                        Label(branch, systemImage: "arrow.triangle.branch")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(abbreviatedPath(session.cwd))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(stateText(session))
+                    .font(.callout)
+                    .foregroundStyle(stateColor(session.state))
+                Text(activityText(for: session))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Spacer()
+            Menu {
+                Toggle("Invert menu bar colors", isOn: $store.invertMenubarColors)
+                    .help("On: solid color block behind the count. Off: colored text on the bare menu bar.")
+                Divider()
+                Button("Quit") { NSApp.terminate(nil) }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+    }
+
+    // MARK: Derived
+
+    private func stateColor(_ state: ClaudeSession.State) -> Color {
+        switch state {
+        case .busy: return .orange
+        case .shell: return .blue
+        case .idle: return Color(nsColor: .secondaryLabelColor)
+        case .waitingForInput: return .red
+        }
+    }
+
+    private func stateText(_ session: ClaudeSession) -> String {
+        switch session.state {
+        case .busy: return "Working"
+        case .shell: return "Shell command"
+        case .idle: return "Idle"
+        case .waitingForInput:
+            if let what = session.waitingFor, !what.isEmpty {
+                return "Waiting: \(what)"
+            }
+            return "Waiting for input"
+        }
+    }
+
+    /// "for 12s · up 2h 14m" — how long the current state has held, plus
+    /// session age.
+    private func activityText(for session: ClaudeSession) -> String {
+        var parts: [String] = []
+        if let since = session.stateSince {
+            parts.append("for \(StatusFormat.compactAge(since: since, now: now))")
+        }
+        if let started = session.startedAt {
+            parts.append("up \(StatusFormat.compactDuration(from: started, to: now))")
+        }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    private func abbreviatedPath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
+    }
+}
+
+// MARK: - Formatting helpers
+
+enum StatusFormat {
+    /// "just now" / "12s ago" / "3m ago" / "2h 5m ago"
+    static func agoString(since past: Date, now: Date = Date()) -> String {
+        let secs = max(0, Int(now.timeIntervalSince(past)))
+        if secs < 5 { return "just now" }
+        if secs < 60 { return "\(secs)s ago" }
+        return "\(compactDuration(from: past, to: now)) ago"
+    }
+
+    /// "2h 34m" / "57m" / "0m" — same shape as ClaudeUsage's duration labels.
+    static func compactDuration(from start: Date, to end: Date) -> String {
+        let secs = max(0, Int(end.timeIntervalSince(start)))
+        let h = secs / 3600
+        let m = (secs % 3600) / 60
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
+    }
+
+    /// "12s" / "3m" / "2h 5m" — seconds-precision only while young, for the
+    /// "state held for …" label.
+    static func compactAge(since past: Date, now: Date = Date()) -> String {
+        let secs = max(0, Int(now.timeIntervalSince(past)))
+        if secs < 60 { return "\(secs)s" }
+        return compactDuration(from: past, to: now)
+    }
+}
