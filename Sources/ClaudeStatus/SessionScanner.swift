@@ -21,7 +21,9 @@ struct ClaudeSession: Identifiable, Equatable {
     /// Claude Code's derived session name, e.g. "claude-status-b3".
     let name: String?
     let sessionId: String?
-    let gitBranch: String?
+    /// var, not let: the store carries the last known branch forward when a
+    /// scan can't see one in the transcript tail.
+    var gitBranch: String?
     let state: State
     /// What the session is blocked on, when the CLI says (`waitingFor`).
     let waitingFor: String?
@@ -164,8 +166,8 @@ enum SessionScanner {
     }
 
     struct TranscriptTail: Equatable {
-        var sessionId: String?
-        var gitBranch: String?
+        var sessionId: String? = nil
+        var gitBranch: String? = nil
     }
 
     /// Read the last chunk of the transcript and pull sessionId/gitBranch
@@ -182,14 +184,24 @@ enum SessionScanner {
     }
 
     /// Split out from readTail so tests can feed synthetic transcripts.
+    /// sessionId and gitBranch are hunted for independently, each from the
+    /// newest entry that carries it — plenty of entries have a sessionId but
+    /// no gitBranch (progress records, tool results), and taking the branch
+    /// only off the newest sessionId entry made the label flicker in and
+    /// out between polls.
     static func parseTail(_ text: String) -> TranscriptTail? {
+        var tail = TranscriptTail()
         for line in text.split(separator: "\n").reversed() {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
             else { continue }  // first line may be truncated by the byte window
-            if let sid = obj["sessionId"] as? String {
-                return TranscriptTail(sessionId: sid, gitBranch: obj["gitBranch"] as? String)
+            if tail.sessionId == nil, let sid = obj["sessionId"] as? String {
+                tail.sessionId = sid
             }
+            if tail.gitBranch == nil, let branch = obj["gitBranch"] as? String, !branch.isEmpty {
+                tail.gitBranch = branch
+            }
+            if tail.sessionId != nil && tail.gitBranch != nil { break }
         }
-        return nil
+        return tail.sessionId == nil && tail.gitBranch == nil ? nil : tail
     }
 }

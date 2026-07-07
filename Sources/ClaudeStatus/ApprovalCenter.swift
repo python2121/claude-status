@@ -11,7 +11,19 @@ struct PendingApproval: Identifiable, Equatable {
     /// Human-readable one-liner of what's being approved (e.g. the Bash
     /// command), pre-truncated for display.
     let summary: String
+    /// The full approval text (newlines intact, generous cap) — what the
+    /// tooltip shows on hover.
+    let detail: String
     let receivedAt: Date
+}
+
+/// What the app learns about one permission request from its request line.
+struct ApprovalRequestInfo: Equatable {
+    let sessionId: String?
+    let cwd: String?
+    let toolName: String
+    let summary: String
+    let detail: String
 }
 
 /// Wire format between the hook helper and the app, plus the JSON the hook
@@ -37,21 +49,24 @@ enum ApprovalWire {
         return line
     }
 
-    /// App side: request line → displayable request.
-    static func parseRequest(_ line: Data) -> (sessionId: String?, cwd: String?, toolName: String, summary: String)? {
+    /// App side: request line → displayable request. `summary` is the
+    /// clipped single line for the row; `detail` keeps newlines and a much
+    /// more generous cap for the hover tooltip.
+    static func parseRequest(_ line: Data) -> ApprovalRequestInfo? {
         guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return nil }
         let tool = obj["toolName"] as? String ?? "unknown"
-        return (
+        return ApprovalRequestInfo(
             sessionId: obj["sessionId"] as? String,
             cwd: obj["cwd"] as? String,
             toolName: tool,
-            summary: summary(tool: tool, input: obj["toolInput"])
+            summary: summary(tool: tool, input: obj["toolInput"]),
+            detail: summary(tool: tool, input: obj["toolInput"], maxChars: 4000, collapseNewlines: false)
         )
     }
 
     /// "Bash: swift build" / "Edit: /path/to/file" / "WebFetch: {…}" — the
     /// most meaningful single field per tool, falling back to compact JSON.
-    static func summary(tool: String, input: Any?, maxChars: Int = 200) -> String {
+    static func summary(tool: String, input: Any?, maxChars: Int = 200, collapseNewlines: Bool = true) -> String {
         var detail = ""
         if let dict = input as? [String: Any] {
             // The fields users actually recognize, in priority order.
@@ -64,8 +79,10 @@ enum ApprovalWire {
                 detail = text
             }
         }
-        let collapsed = detail.split(whereSeparator: \.isNewline).joined(separator: " ")
-        let clipped = collapsed.count > maxChars ? String(collapsed.prefix(maxChars - 1)) + "…" : collapsed
+        if collapseNewlines {
+            detail = detail.split(whereSeparator: \.isNewline).joined(separator: " ")
+        }
+        let clipped = detail.count > maxChars ? String(detail.prefix(maxChars - 1)) + "…" : detail
         return clipped.isEmpty ? tool : "\(tool): \(clipped)"
     }
 
@@ -105,7 +122,7 @@ enum ApprovalWire {
 /// actor yourself.
 final class ApprovalServer {
     let path: String
-    var onRequest: ((_ id: UUID, _ sessionId: String?, _ cwd: String?, _ toolName: String, _ summary: String) -> Void)?
+    var onRequest: ((_ id: UUID, _ info: ApprovalRequestInfo) -> Void)?
     var onClosed: ((_ id: UUID) -> Void)?
 
     private var listenFD: Int32 = -1
@@ -197,7 +214,7 @@ final class ApprovalServer {
 
         guard let line = readLine(fd),
               let req = ApprovalWire.parseRequest(line) else { return }
-        onRequest?(id, req.sessionId, req.cwd, req.toolName, req.summary)
+        onRequest?(id, req)
 
         // Block until the peer closes (helper timeout/death) or respond()
         // shuts the socket down. Either way the deferred cleanup runs, and

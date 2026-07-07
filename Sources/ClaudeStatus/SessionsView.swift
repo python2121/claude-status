@@ -78,17 +78,17 @@ struct SessionsView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(session.projectName)
                         .font(.system(size: 14, weight: .semibold))
-                    if let branch = session.gitBranch, !branch.isEmpty {
-                        Label(branch, systemImage: "arrow.triangle.branch")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
                     if store.hasAutoApprove(session) {
                         Image(systemName: "bolt.fill")
                             .font(.caption2)
                             .foregroundStyle(.yellow)
                             .help("Auto-approving permission requests for this session")
                     }
+                }
+                if let branch = session.gitBranch, !branch.isEmpty {
+                    Label(branch, systemImage: "arrow.triangle.branch")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Text(abbreviatedPath(session.cwd))
                     .font(.caption)
@@ -119,13 +119,12 @@ struct SessionsView: View {
     }
 
     private func approvalControls(for approval: PendingApproval, in session: ClaudeSession) -> some View {
-        VStack(alignment: .trailing, spacing: 3) {
-            HStack(spacing: 4) {
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack(spacing: 6) {
                 Button("Approve") { store.approve(approval) }
-                    .controlSize(.small)
-                    .tint(.green)
+                    .buttonStyle(ApprovalPillStyle(color: Self.approveGreen))
                 Button("Deny") { store.deny(approval) }
-                    .controlSize(.small)
+                    .buttonStyle(ApprovalPillStyle(color: .red))
                 Menu {
                     Button("Approve all for 5 minutes") {
                         if let sid = session.sessionId {
@@ -139,19 +138,32 @@ struct SessionsView: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
+                        .foregroundStyle(.secondary)
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
             }
+            // Hover reveals the full request (newlines intact) after the
+            // system's standard tooltip delay.
             Text(pendingSummary(approval, in: session))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: 200, alignment: .trailing)
-                .help(approval.summary)
+                .help(approval.detail)
         }
     }
+
+    /// Approve-pill green: plain systemGreen is too washed out against the
+    /// panel's near-white light-mode background, so light mode gets a deeper
+    /// forest green; dark mode keeps the brighter system green, which reads
+    /// well on dark.
+    private static let approveGreen = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? .systemGreen
+            : NSColor(srgbRed: 0.11, green: 0.50, blue: 0.24, alpha: 1)
+    })
 
     private func pendingSummary(_ approval: PendingApproval, in session: ClaudeSession) -> String {
         let more = store.pendingCount(for: session) - 1
@@ -217,6 +229,28 @@ struct SessionsView: View {
             return "~" + path.dropFirst(home.count)
         }
         return path
+    }
+}
+
+/// Compact tinted capsule for the inline Approve/Deny verdict buttons —
+/// color-on-soft-color so the pair reads instantly (green = go, red = stop)
+/// against the panel's vibrancy, with a darker fill while pressed. Hover
+/// shows the pointing hand as the click affordance.
+private struct ApprovalPillStyle: ButtonStyle {
+    let color: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3.5)
+            .foregroundStyle(color)
+            .background(Capsule().fill(color.opacity(configuration.isPressed ? 0.35 : 0.15)))
+            .overlay(Capsule().strokeBorder(color.opacity(0.35), lineWidth: 0.5))
+            .contentShape(Capsule())
+            .onHover { inside in
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
     }
 }
 

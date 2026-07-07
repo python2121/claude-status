@@ -47,7 +47,14 @@ final class SessionStore: ObservableObject {
 
     func refresh() async {
         // The scan blocks on file IO — keep it off the main thread.
-        let scanned = await Task.detached(priority: .utility) { SessionScanner.scan() }.value
+        var scanned = await Task.detached(priority: .utility) { SessionScanner.scan() }.value
+        // Branch is garnish scraped from the transcript tail and not every
+        // scan can see one (the tail window may hold only branch-less
+        // entries). Sessions don't lose their branch — carry the last known
+        // value forward instead of letting the label flicker out.
+        for i in scanned.indices where scanned[i].gitBranch == nil {
+            scanned[i].gitBranch = sessions.first { $0.pid == scanned[i].pid }?.gitBranch
+        }
         if scanned != sessions { sessions = scanned }
         reconcilePendingWithRegistry()
         pruneRules()
@@ -101,10 +108,11 @@ final class SessionStore: ObservableObject {
 
     private func startApprovalServer() {
         let server = ApprovalServer(path: ApprovalSocket.defaultPath)
-        server.onRequest = { [weak self] id, sessionId, cwd, toolName, summary in
+        server.onRequest = { [weak self] id, info in
             let approval = PendingApproval(
-                id: id, sessionId: sessionId, cwd: cwd,
-                toolName: toolName, summary: summary, receivedAt: Date())
+                id: id, sessionId: info.sessionId, cwd: info.cwd,
+                toolName: info.toolName, summary: info.summary,
+                detail: info.detail, receivedAt: Date())
             Task { @MainActor in self?.received(approval) }
         }
         server.onClosed = { [weak self] id in
@@ -190,21 +198,32 @@ final class SessionStore: ObservableObject {
     var shellCount: Int { sessions.filter { effectiveState($0) == .shell }.count }
     var idleCount: Int { sessions.filter { effectiveState($0) == .idle }.count }
 
-    /// Menubar text + color: the session count, orange when anything is
-    /// waiting on the user, green when sessions are working, muted when
-    /// everything is idle (or nothing is running). `filled` requests a solid color block
-    /// (the state color as background, contrasting text) instead of
-    /// colored-on-clear text — far more legible in the menu bar. Only the
-    /// active states (green/orange) fill — and only when `invertMenubarColors`
-    /// is on; the muted zero/idle state stays plain so it blends in.
-    var menubarLabel: (text: String, color: NSColor, filled: Bool) {
-        Self.label(total: sessions.count, busy: busyCount, waiting: waitingCount, invert: invertMenubarColors)
+    // MARK: Menubar symbol
+
+    /// What the tray glyph communicates: ● orange when anything needs the
+    /// user (approval pending / waiting on input), an animated ◐◓◑◒ spinner
+    /// in green while sessions are working, ○ in the system label color —
+    /// black/white with the theme, like the neighboring menu bar items —
+    /// when everything is idle (or nothing is running).
+    enum TrayState: Equatable {
+        case idle
+        case busy
+        case waiting
     }
 
-    nonisolated static func label(total: Int, busy: Int, waiting: Int, invert: Bool) -> (text: String, color: NSColor, filled: Bool) {
-        let text = "\(total)"
-        if waiting > 0 { return (text, .systemOrange, invert) }
-        if busy > 0 { return (text, .systemGreen, invert) }
-        return (text, .secondaryLabelColor, false)
+    var trayState: TrayState { Self.trayState(busy: busyCount, waiting: waitingCount) }
+
+    nonisolated static func trayState(busy: Int, waiting: Int) -> TrayState {
+        if waiting > 0 { return .waiting }
+        if busy > 0 { return .busy }
+        return .idle
+    }
+
+    nonisolated static func trayColor(_ state: TrayState) -> NSColor {
+        switch state {
+        case .waiting: return .systemOrange
+        case .busy: return .systemGreen
+        case .idle: return .labelColor
+        }
     }
 }

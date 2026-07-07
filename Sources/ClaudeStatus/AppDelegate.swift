@@ -38,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
     private var sizeObservation: NSKeyValueObservation?
     private var clickMonitor: Any?
+    private var spinnerFrame = 0
+    private var spinnerTimer: Timer?
 
     // Visual + motion tuning. Wider than ClaudeUsage's 280 pt panel (was 2×,
     // trimmed ~30% from there); the height still follows the SwiftUI content.
@@ -320,65 +322,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Menubar title
 
-    /// The session count: orange when any session is waiting on the user,
-    /// green while sessions are working, muted secondary at zero.
+    /// The tray glyph: ● orange when any session is waiting on the user, a
+    /// spinning half-disc in green while sessions are working, ○ in the
+    /// system label color when idle. The spinner timer runs only in the busy
+    /// state.
+    ///
+    /// The shapes are DRAWN, not font glyphs: the system font lacks ◐◓◑◒
+    /// (U+25D0–25D3), and font fallback served the left/right and top/bottom
+    /// halves from different fonts at visibly different sizes. Drawing them
+    /// keeps all frames (and ○/●) pixel-identical.
     private func updateStatusItemTitle() {
         guard let button = statusItem.button else { return }
-        let label = store.menubarLabel
-        let baseFont = NSFont.menuBarFont(ofSize: 0)
-        let font = NSFont.systemFont(ofSize: baseFont.pointSize, weight: .heavy)
+        let state = store.trayState
+        syncSpinner(with: state)
+        button.image = Self.trayGlyphImage(
+            state: state,
+            spinnerFrame: spinnerFrame,
+            invert: store.invertMenubarColors,
+            pointSize: NSFont.menuBarFont(ofSize: 0).pointSize)
+        button.imagePosition = .imageOnly
+        button.attributedTitle = NSAttributedString(string: "")
+    }
 
-        if label.filled {
-            // Solid color block, contrasting text. Drawn as a (non-template)
-            // image so we get a filled background the menubar can't give an
-            // attributed title. The dynamic fill resolves per-appearance at
-            // draw time.
-            button.image = Self.filledLabelImage(text: label.text, fill: label.color, font: font)
-            button.imagePosition = .imageOnly
-            button.attributedTitle = NSAttributedString(string: "")
-        } else {
-            button.image = nil
-            button.imagePosition = .noImage
-            let attrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: label.color,
-                .font: font,
-            ]
-            button.attributedTitle = NSAttributedString(string: label.text, attributes: attrs)
+    /// Start/stop the spinner animation to match the tray state. Thirty-two
+    /// frames over 2 s = one revolution per 2 s; the frame resets when the
+    /// spin stops so the next busy period always starts from the left. Keep
+    /// the interval in step with the frame count in trayGlyphImage —
+    /// changing one without the other changes the spin rate.
+    private func syncSpinner(with state: SessionStore.TrayState) {
+        if state == .busy {
+            guard spinnerTimer == nil else { return }
+            spinnerTimer = Timer.scheduledTimer(withTimeInterval: 2.0 / 32, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.spinnerFrame += 1
+                    self.updateStatusItemTitle()
+                }
+            }
+        } else if spinnerTimer != nil {
+            spinnerTimer?.invalidate()
+            spinnerTimer = nil
+            spinnerFrame = 0
         }
     }
 
-    /// A solid rounded color block with contrasting, centered text — the
-    /// menubar "pill". Sized to the text plus small padding; redrawn on demand
-    /// so the dynamic `fill` re-resolves when the system appearance changes.
-    private static func filledLabelImage(text: String, fill: NSColor, font: NSFont) -> NSImage {
-        let padX: CGFloat = 5
-        let padY: CGFloat = 1.5
-        let radius: CGFloat = 3.5
+    /// One menubar frame: ○ (stroked), ● (filled), or a half-disc spinner
+    /// frame (stroked outline + filled half; the half steps left → top →
+    /// right → bottom like ◐◓◑◒). With `invert` on, the glyph draws in
+    /// contrasting color on a rounded block of the state color — the same
+    /// pill look the numeric label had; idle stays plain. Redrawn on demand
+    /// so dynamic colors (idle's labelColor) re-resolve when the system
+    /// appearance changes.
+    private static func trayGlyphImage(
+        state: SessionStore.TrayState,
+        spinnerFrame: Int,
+        invert: Bool,
+        pointSize: CGFloat
+    ) -> NSImage {
+        let diameter = (pointSize * 0.85).rounded()
+        let stroke: CGFloat = 1.5
+        let color = SessionStore.trayColor(state)
+        let pill = invert && state != .idle
+        let padX: CGFloat = pill ? 5 : 1
+        let padY: CGFloat = pill ? 3 : 1
 
-        let measureAttrs: [NSAttributedString.Key: Any] = [.font: font]
-        let textSize = (text as NSString).size(withAttributes: measureAttrs)
-        let width = ceil(textSize.width + padX * 2)
-        let height = ceil(textSize.height + padY * 2)
+        let size = NSSize(width: diameter + padX * 2, height: diameter + padY * 2)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let glyphColor: NSColor
+            if pill {
+                NSBezierPath(roundedRect: rect, xRadius: 3.5, yRadius: 3.5).setClip()
+                color.setFill()
+                rect.fill()
+                glyphColor = Self.contrastingText(on: color)
+            } else {
+                glyphColor = color
+            }
 
-        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
-            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).setClip()
-            fill.setFill()
-            rect.fill()
+            let box = NSRect(
+                x: (rect.width - diameter) / 2, y: (rect.height - diameter) / 2,
+                width: diameter, height: diameter)
+            let outlineBox = box.insetBy(dx: stroke / 2, dy: stroke / 2)
+            glyphColor.setFill()
+            glyphColor.setStroke()
 
-            // Black reads best on the green/orange fills; the luma check
-            // switches to white if a fill ever goes dark.
-            let textColor = Self.contrastingText(on: fill)
-
-            let para = NSMutableParagraphStyle()
-            para.alignment = .center
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: textColor,
-                .paragraphStyle: para,
-            ]
-            let ts = (text as NSString).size(withAttributes: attrs)
-            let textRect = NSRect(x: 0, y: (rect.height - ts.height) / 2, width: rect.width, height: ts.height)
-            (text as NSString).draw(in: textRect, withAttributes: attrs)
+            switch state {
+            case .idle:
+                let ring = NSBezierPath(ovalIn: outlineBox)
+                ring.lineWidth = stroke
+                ring.stroke()
+            case .waiting:
+                NSBezierPath(ovalIn: box).fill()
+            case .busy:
+                let ring = NSBezierPath(ovalIn: outlineBox)
+                ring.lineWidth = stroke
+                ring.stroke()
+                // Filled wedge inside the ring. Two knobs: `sweep` (arc
+                // width — 180 would be the ◐-style half) and `gap` (breathing
+                // room between wedge and ring, which lightens the glyph a
+                // lot). Thirty-two frames, 11.25° apart, sweeping the same
+                // direction the four-frame ◐◓◑◒ cycle did (left → top → …).
+                let sweep: CGFloat = 110
+                let gap: CGFloat = 1.5
+                let frames: CGFloat = 32
+                let idx = CGFloat(((spinnerFrame % Int(frames)) + Int(frames)) % Int(frames))
+                let mid = 180 - (360 / frames) * idx
+                let center = NSPoint(x: box.midX, y: box.midY)
+                let wedge = NSBezierPath()
+                wedge.move(to: center)
+                wedge.appendArc(withCenter: center, radius: diameter / 2 - stroke - gap,
+                                startAngle: mid - sweep / 2, endAngle: mid + sweep / 2)
+                wedge.close()
+                wedge.fill()
+            }
             return true
         }
         image.isTemplate = false   // keep our colors; don't let the bar tint it

@@ -103,6 +103,21 @@ enum SelfTest {
         t.expectEqual(SessionScanner.parseTail(truncated)?.gitBranch, "feature/x",
                       "parseTail skips truncated first line")
 
+        // The newest entries often carry a sessionId but no gitBranch
+        // (progress records, tool results) — the branch must come from the
+        // newest entry that HAS one, not vanish.
+        let branchlessNewest = """
+        {"type":"user","sessionId":"abc-123","gitBranch":"feature/y","message":{}}
+        {"type":"progress","sessionId":"abc-123"}
+        {"type":"assistant","sessionId":"abc-123","message":{"stop_reason":"tool_use"}}
+        """
+        let tail2 = SessionScanner.parseTail(branchlessNewest)
+        t.expectEqual(tail2?.sessionId, "abc-123", "parseTail: sessionId from newest entry")
+        t.expectEqual(tail2?.gitBranch, "feature/y", "parseTail: branch survives branch-less newer entries")
+
+        t.expectEqual(SessionScanner.parseTail(#"{"sessionId":"s","gitBranch":""}"#)?.gitBranch, nil,
+                      "parseTail: empty-string branch ignored")
+
         t.expectNil(SessionScanner.parseTail(""), "parseTail empty → nil")
         t.expectNil(SessionScanner.parseTail("not json at all"), "parseTail garbage → nil")
 
@@ -110,28 +125,27 @@ enum SelfTest {
 
         t.expectEqual(SessionScanner.pidAlive(getpid()), true, "own pid is alive")
 
-        // MARK: menubar label
+        // MARK: menubar symbol
 
-        t.expectEqual(SessionStore.label(total: 0, busy: 0, waiting: 0, invert: true).text, "0", "label text at zero")
-        t.expectEqual(SessionStore.label(total: 0, busy: 0, waiting: 0, invert: true).color, .secondaryLabelColor, "zero sessions → muted")
-        t.expectEqual(SessionStore.label(total: 3, busy: 2, waiting: 0, invert: true).color, .systemGreen, "busy → green")
-        t.expectEqual(SessionStore.label(total: 3, busy: 2, waiting: 1, invert: true).color, .systemOrange, "any waiting → orange")
-        t.expectEqual(SessionStore.label(total: 2, busy: 0, waiting: 0, invert: true).color, .secondaryLabelColor, "all idle → muted")
-        t.expectEqual(SessionStore.label(total: 3, busy: 1, waiting: 1, invert: true).text, "3", "label shows total count")
-        t.expectEqual(SessionStore.label(total: 3, busy: 2, waiting: 0, invert: true).filled, true, "invert on + busy → filled pill")
-        t.expectEqual(SessionStore.label(total: 3, busy: 2, waiting: 1, invert: false).filled, false, "invert off → never filled")
-        t.expectEqual(SessionStore.label(total: 2, busy: 0, waiting: 0, invert: true).filled, false, "muted idle state stays plain even inverted")
+        t.expectEqual(SessionStore.trayState(busy: 0, waiting: 0), .idle, "tray: nothing running → idle")
+        t.expectEqual(SessionStore.trayState(busy: 2, waiting: 0), .busy, "tray: busy sessions → busy")
+        t.expectEqual(SessionStore.trayState(busy: 2, waiting: 1), .waiting, "tray: any waiting beats busy")
+
+        t.expectEqual(SessionStore.trayColor(.idle), .labelColor, "tray color: idle → system label color")
+        t.expectEqual(SessionStore.trayColor(.busy), .systemGreen, "tray color: busy → green")
+        t.expectEqual(SessionStore.trayColor(.waiting), .systemOrange, "tray color: waiting → orange")
 
         // MARK: approval wire format
 
-        let hookInput = #"{"session_id":"s-1","cwd":"/tmp/proj","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf build","description":"clean"}}"#
+        let hookInput = #"{"session_id":"s-1","cwd":"/tmp/proj","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf build\necho done","description":"clean"}}"#
         if let line = ApprovalWire.requestLine(fromHookInput: Data(hookInput.utf8)) {
             t.expectEqual(line.last, 0x0A, "wire: request line newline-terminated")
             let req = ApprovalWire.parseRequest(line.dropLast())
             t.expectEqual(req?.sessionId, "s-1", "wire: sessionId round-trips")
             t.expectEqual(req?.cwd, "/tmp/proj", "wire: cwd round-trips")
             t.expectEqual(req?.toolName, "Bash", "wire: toolName round-trips")
-            t.expectEqual(req?.summary, "Bash: rm -rf build", "wire: Bash summary prefers command")
+            t.expectEqual(req?.summary, "Bash: rm -rf build echo done", "wire: row summary collapses newlines")
+            t.expectEqual(req?.detail, "Bash: rm -rf build\necho done", "wire: hover detail keeps newlines")
         } else {
             t.expectEqual(false, true, "wire: requestLine produced nil")
         }
@@ -142,6 +156,8 @@ enum SelfTest {
         t.expectEqual(ApprovalWire.summary(tool: "Mystery", input: nil), "Mystery", "wire: no input → bare tool name")
         t.expectEqual(ApprovalWire.summary(tool: "Bash", input: ["command": String(repeating: "x", count: 300)]).count <= 206,
                       true, "wire: summary clipped")
+        t.expectEqual(ApprovalWire.summary(tool: "Bash", input: ["command": String(repeating: "y", count: 5000)], maxChars: 4000, collapseNewlines: false).count <= 4006,
+                      true, "wire: detail clipped at its own cap")
 
         t.expectEqual(ApprovalWire.parseResponse(ApprovalWire.responseLine(allow: true).dropLast()), true, "wire: allow round-trips")
         t.expectEqual(ApprovalWire.parseResponse(ApprovalWire.responseLine(allow: false).dropLast()), false, "wire: deny round-trips")
@@ -205,9 +221,9 @@ enum SelfTest {
         let gotRequest = DispatchSemaphore(value: 0)
         var requestedId: UUID?
         var requestedSummary: String?
-        server.onRequest = { id, _, _, _, summary in
+        server.onRequest = { id, info in
             requestedId = id
-            requestedSummary = summary
+            requestedSummary = info.summary
             gotRequest.signal()
         }
         if server.start() {

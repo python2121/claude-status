@@ -55,6 +55,15 @@ if ! codesign --verify --verbose=1 "${DEST}" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Register the PermissionRequest hook in ~/.claude/settings.json so approvals
+# can be answered from the app. Idempotent (only touches its own marked
+# entry, prints "Nothing to do" when already present). SKIP_HOOK=1 to opt
+# out; remove later with: ClaudeStatus --uninstall-hook
+if [[ "${SKIP_HOOK:-0}" != "1" ]]; then
+  echo "==> registering Claude Code permission hook"
+  "${DEST}/Contents/MacOS/${APP_NAME}" --install-hook
+fi
+
 # Start it. Prefer the LaunchAgent if the user has set one up — that way
 # launchd will keep it alive and restart it on crash. Otherwise just open.
 if [[ -f "${PLIST}" ]]; then
