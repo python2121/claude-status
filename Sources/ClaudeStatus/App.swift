@@ -43,9 +43,27 @@ struct ClaudeStatusMain {
                 case .waitingForInput: state = "waiting" + (s.waitingFor.map { " (\($0))" } ?? "")
                 }
                 let since = s.stateSince.map { StatusFormat.compactAge(since: $0) } ?? "?"
+                let host = TerminalFocus.hostApp(of: s.pid)?.bundleIdentifier ?? "-"
                 print("pid=\(s.pid) [\(state) for \(since)] \(s.name ?? s.projectName) (\(s.gitBranch ?? "-")) \(s.cwd)")
+                print("    host=\(host) title=\(s.title.map { "\"\($0)\"" } ?? "-")")
             }
             print("\(sessions.count) session(s), \(sessions.filter { $0.state == .waitingForInput }.count) waiting")
+            exit(0)
+        }
+
+        // Headless focus: `--focus <pid>` raises that session's terminal and
+        // prints the outcome — exercises the adapter path without the GUI.
+        if let i = CommandLine.arguments.firstIndex(of: "--focus") {
+            guard i + 1 < CommandLine.arguments.count, let pid = Int32(CommandLine.arguments[i + 1]) else {
+                FileHandle.standardError.write(Data("usage: ClaudeStatus --focus <pid>\n".utf8))
+                exit(2)
+            }
+            guard let session = SessionScanner.scan().first(where: { $0.pid == pid }) else {
+                FileHandle.standardError.write(Data("no live session with pid \(pid)\n".utf8))
+                exit(1)
+            }
+            print("host=\(TerminalFocus.hostApp(of: pid)?.bundleIdentifier ?? "-") title=\(session.title ?? "-")")
+            print("outcome=\(TerminalFocus.focus(session))")
             exit(0)
         }
 

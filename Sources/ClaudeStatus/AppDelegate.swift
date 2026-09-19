@@ -74,7 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Panel construction
 
     private func buildPanel() {
-        hostingController = NSHostingController(rootView: SessionsView(store: store))
+        hostingController = NSHostingController(rootView: SessionsView(
+            store: store,
+            onFocusSession: { [weak self] session in self?.focusTerminal(for: session) }))
         // Report the SwiftUI ideal size as preferredContentSize so we can size
         // the panel to the content (and resize-follow when it changes).
         hostingController.sizingOptions = [.preferredContentSize]
@@ -276,6 +278,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.setContentSize(size)
         if let origin = panelOrigin(for: panel.frame.size) {
             panel.setFrameOrigin(origin)
+        }
+    }
+
+    // MARK: Click-to-focus
+
+    private let focusQueue = DispatchQueue(label: "com.andrewnowicki.claudestatus.terminal-focus")
+
+    /// Row click: hide the overlay first (a popUpMenu-level floating panel
+    /// would otherwise sit over the terminal we're about to raise), then
+    /// hand off to TerminalFocus off the main thread — Apple events block
+    /// while the target app answers, and the first call to each emulator
+    /// blocks on the Automation (TCC) prompt.
+    private func focusTerminal(for session: ClaudeSession) {
+        closePanel()
+        focusQueue.async {
+            let outcome = TerminalFocus.focus(session)
+            NSLog("ClaudeStatus: focus %@ → %@", session.name ?? "\(session.pid)", String(describing: outcome))
         }
     }
 

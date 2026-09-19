@@ -66,6 +66,8 @@ cat >"${APP_DIR}/Contents/Info.plist" <<PLIST
   <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Claude Status brings a session's terminal to the front when you click its row.</string>
 </dict>
 </plist>
 PLIST

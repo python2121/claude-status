@@ -250,6 +250,67 @@ enum SelfTest {
             t.expectEqual(false, true, "server: failed to start on \(sockPath)")
         }
 
+        // MARK: terminal focus
+
+        let titledTail = """
+        {"type":"user","sessionId":"s1","gitBranch":"main","cwd":"/x"}
+        {"type":"ai-title","aiTitle":"Old title","sessionId":"s1"}
+        {"type":"ai-title","aiTitle":"Swift builds failing","sessionId":"s1"}
+        {"type":"progress","sessionId":"s1"}
+        """
+        let titled = SessionScanner.parseTail(titledTail)
+        t.expectEqual(titled?.aiTitle, "Swift builds failing", "tail: newest ai-title wins")
+        t.expectEqual(titled?.gitBranch, "main", "tail: branch still found past ai-title entries")
+        t.expectNil(SessionScanner.parseTail(#"{"type":"ai-title","aiTitle":"","sessionId":"s1"}"#)?.aiTitle, "tail: empty ai-title ignored")
+        t.expectNil(SessionScanner.parseTail(#"{"type":"user","aiTitle":"not a title entry","sessionId":"s1"}"#)?.aiTitle, "tail: aiTitle only read off ai-title entries")
+
+        t.expectEqual(TerminalFocus.adapter(forBundleId: "com.mitchellh.ghostty"), .ghostty, "focus: Ghostty adapter")
+        t.expectEqual(TerminalFocus.adapter(forBundleId: "com.apple.Terminal"), .terminalApp, "focus: Terminal adapter")
+        t.expectEqual(TerminalFocus.adapter(forBundleId: "com.googlecode.iterm2"), .iterm, "focus: iTerm adapter")
+        t.expectEqual(TerminalFocus.adapter(forBundleId: "com.microsoft.VSCode"), .generic, "focus: unknown app → generic")
+        t.expectEqual(TerminalFocus.adapter(forBundleId: nil), .generic, "focus: nil bundle → generic")
+
+        let surfaces = [
+            TerminalFocus.GhosttyTerminal(id: "A", name: "◐ Fix the build", cwd: "/repo/one"),
+            TerminalFocus.GhosttyTerminal(id: "B", name: "◑ Fix the build", cwd: "/repo/two"),
+            TerminalFocus.GhosttyTerminal(id: "C", name: "✳ Claude Code", cwd: "/repo/two"),
+            TerminalFocus.GhosttyTerminal(id: "D", name: "cargo run", cwd: "/repo/three/"),
+        ]
+        t.expectEqual(TerminalFocus.pickGhosttyTerminal(surfaces, cwd: "/repo/two", title: "Fix the build")?.id, "B", "pick: cwd + title beats title alone")
+        t.expectEqual(TerminalFocus.pickGhosttyTerminal(surfaces, cwd: "/elsewhere", title: "Fix the build")?.id, "A", "pick: title alone when cwd differs")
+        t.expectEqual(TerminalFocus.pickGhosttyTerminal(surfaces, cwd: "/repo/two", title: nil)?.id, "B", "pick: cwd alone, first in order")
+        t.expectEqual(TerminalFocus.pickGhosttyTerminal(surfaces, cwd: "/repo/three", title: "")?.id, "D", "pick: trailing slash tolerated, empty title ignored")
+        t.expectNil(TerminalFocus.pickGhosttyTerminal(surfaces, cwd: "/nope", title: "Nothing"), "pick: no match → nil (fall back to app)")
+
+        func strList(_ xs: [String]) -> NSAppleEventDescriptor {
+            let l = NSAppleEventDescriptor.list()
+            for x in xs { l.insert(NSAppleEventDescriptor(string: x), at: 0) }
+            return l
+        }
+        let reply = NSAppleEventDescriptor.list()
+        reply.insert(strList(["id1", "id2"]), at: 0)
+        reply.insert(strList(["◐ One", "Two"]), at: 0)
+        reply.insert(strList(["/a", "/b"]), at: 0)
+        t.expectEqual(TerminalFocus.parseGhosttyList(reply), [
+            TerminalFocus.GhosttyTerminal(id: "id1", name: "◐ One", cwd: "/a"),
+            TerminalFocus.GhosttyTerminal(id: "id2", name: "Two", cwd: "/b"),
+        ], "ghostty: parallel lists zip into terminals")
+        t.expectNil(TerminalFocus.parseGhosttyList(NSAppleEventDescriptor(string: "oops")), "ghostty: non-list reply → nil")
+        t.expectEqual(TerminalFocus.parseGhosttyList(reply)?.count, 2, "ghostty: count")
+
+        t.expectEqual(TerminalFocus.appleScriptLiteral(#"say "hi" \ bye"#), #"say \"hi\" \\ bye"#, "script: literal escaping")
+        t.expectEqual(TerminalFocus.ghosttyFocusScript(terminalId: "X\"Y").contains(#"terminal id "X\"Y""#), true, "script: id embedded escaped")
+        t.expectEqual(TerminalFocus.terminalAppScript(tty: "/dev/ttys004").contains(#"tty of t is "/dev/ttys004""#), true, "script: Terminal tty embedded")
+        t.expectEqual(TerminalFocus.itermScript(tty: "/dev/ttys004").contains(#"tty of s is "/dev/ttys004""#), true, "script: iTerm tty embedded")
+
+        t.expectEqual(TerminalFocus.parentPid(of: getpid()), getppid(), "proc: parent pid via sysctl")
+        t.expectNil(TerminalFocus.parentPid(of: 999_999), "proc: dead pid → nil")
+        if let tty = TerminalFocus.ttyPath(of: getpid()) {
+            t.expectEqual(tty.hasPrefix("/dev/tty"), true, "proc: tty path shape")
+        } else {
+            t.expectEqual(true, true, "proc: no controlling tty (headless run)")
+        }
+
         // MARK: formatting
 
         let now = Date(timeIntervalSince1970: 1_000_000)

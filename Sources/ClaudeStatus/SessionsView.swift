@@ -3,7 +3,11 @@ import SwiftUI
 
 struct SessionsView: View {
     @ObservedObject var store: SessionStore
+    /// Row click: bring the session's terminal to the front. Injected by
+    /// AppDelegate (which also closes the panel); no-op in previews/tests.
+    var onFocusSession: (ClaudeSession) -> Void = { _ in }
     @ViewState private var now: Date = Date()
+    @ViewState private var hoveredPid: pid_t? = nil
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -62,9 +66,39 @@ struct SessionsView: View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(store.sessions.enumerated()), id: \.element.id) { index, session in
                 if index > 0 { Divider() }
-                row(for: session)
+                clickableRow(for: session)
             }
         }
+    }
+
+    /// The whole row is a click target that raises the session's terminal;
+    /// the Approve/Deny/⋯ controls inside keep their own taps (child
+    /// gestures win). Hover tints the row and shows the pointing hand, same
+    /// affordance as the approval pills. The padding-in/padding-out pair
+    /// draws the highlight slightly larger than the content without
+    /// shifting the layout.
+    private func clickableRow(for session: ClaudeSession) -> some View {
+        row(for: session)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(hoveredPid == session.pid ? 0.06 : 0))
+            )
+            .padding(.horizontal, -6)
+            .padding(.vertical, -5)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside {
+                    hoveredPid = session.pid
+                    NSCursor.pointingHand.set()
+                } else {
+                    if hoveredPid == session.pid { hoveredPid = nil }
+                    NSCursor.arrow.set()
+                }
+            }
+            .onTapGesture { onFocusSession(session) }
+            .help("Bring this session's terminal to the front")
     }
 
     private func row(for session: ClaudeSession) -> some View {

@@ -48,12 +48,14 @@ final class SessionStore: ObservableObject {
     func refresh() async {
         // The scan blocks on file IO — keep it off the main thread.
         var scanned = await Task.detached(priority: .utility) { SessionScanner.scan() }.value
-        // Branch is garnish scraped from the transcript tail and not every
-        // scan can see one (the tail window may hold only branch-less
-        // entries). Sessions don't lose their branch — carry the last known
-        // value forward instead of letting the label flicker out.
-        for i in scanned.indices where scanned[i].gitBranch == nil {
-            scanned[i].gitBranch = sessions.first { $0.pid == scanned[i].pid }?.gitBranch
+        // Branch and title are garnish scraped from the transcript tail and
+        // not every scan can see them (the tail window may hold only entries
+        // without). Sessions don't lose them — carry the last known values
+        // forward instead of letting the label flicker out.
+        for i in scanned.indices {
+            let previous = sessions.first { $0.pid == scanned[i].pid }
+            if scanned[i].gitBranch == nil { scanned[i].gitBranch = previous?.gitBranch }
+            if scanned[i].title == nil { scanned[i].title = previous?.title }
         }
         if scanned != sessions { sessions = scanned }
         reconcilePendingWithRegistry()

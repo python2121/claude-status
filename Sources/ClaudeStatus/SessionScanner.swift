@@ -24,6 +24,10 @@ struct ClaudeSession: Identifiable, Equatable {
     /// var, not let: the store carries the last known branch forward when a
     /// scan can't see one in the transcript tail.
     var gitBranch: String?
+    /// The tab title Claude Code sets for the session (the transcript's
+    /// newest `ai-title` entry). Used to pick the right Ghostty surface on
+    /// click; carried forward like the branch.
+    var title: String?
     let state: State
     /// What the session is blocked on, when the CLI says (`waitingFor`).
     let waitingFor: String?
@@ -82,14 +86,16 @@ enum SessionScanner {
 
     private static func session(for entry: RegistryEntry) -> ClaudeSession {
         var branch: String?
+        var title: String?
         var mtime: Date?
         if let cwd = entry.cwd, let sid = entry.sessionId {
             let transcript = projectsRoot
                 .appendingPathComponent(projectDirName(forCwd: cwd), isDirectory: true)
                 .appendingPathComponent("\(sid).jsonl")
             mtime = (try? FileManager.default.attributesOfItem(atPath: transcript.path)[.modificationDate]) as? Date
-            if mtime != nil {
-                branch = readTail(of: transcript)?.gitBranch
+            if mtime != nil, let tail = readTail(of: transcript) {
+                branch = tail.gitBranch
+                title = tail.aiTitle
             }
         }
         return ClaudeSession(
@@ -98,6 +104,7 @@ enum SessionScanner {
             name: entry.name,
             sessionId: entry.sessionId,
             gitBranch: branch,
+            title: title,
             state: state(fromStatus: entry.status),
             waitingFor: entry.waitingFor,
             lastActivity: mtime,
@@ -168,6 +175,9 @@ enum SessionScanner {
     struct TranscriptTail: Equatable {
         var sessionId: String? = nil
         var gitBranch: String? = nil
+        /// Newest `{"type":"ai-title","aiTitle":…}` entry. Claude Code
+        /// rewrites it every turn, so it's reliably inside the tail window.
+        var aiTitle: String? = nil
     }
 
     /// Read the last chunk of the transcript and pull sessionId/gitBranch
@@ -200,8 +210,12 @@ enum SessionScanner {
             if tail.gitBranch == nil, let branch = obj["gitBranch"] as? String, !branch.isEmpty {
                 tail.gitBranch = branch
             }
-            if tail.sessionId != nil && tail.gitBranch != nil { break }
+            if tail.aiTitle == nil, obj["type"] as? String == "ai-title",
+               let title = obj["aiTitle"] as? String, !title.isEmpty {
+                tail.aiTitle = title
+            }
+            if tail.sessionId != nil && tail.gitBranch != nil && tail.aiTitle != nil { break }
         }
-        return tail.sessionId == nil && tail.gitBranch == nil ? nil : tail
+        return tail.sessionId == nil && tail.gitBranch == nil && tail.aiTitle == nil ? nil : tail
     }
 }

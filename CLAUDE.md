@@ -15,6 +15,7 @@ The build scripts, panel machinery, and visual style are lifted wholesale from `
 ./install.sh                      # build (unless SKIP_BUILD=1), replace /Applications/ClaudeStatus.app, restart
 swift run ClaudeStatus --self-test  # run the hand-rolled test suite (exit 0/1)
 swift run ClaudeStatus --scan       # headless: print detected sessions and exit — debug the heuristics
+swift run ClaudeStatus --focus <pid> # headless: raise that session's terminal, print host app/title/outcome
 swift run                          # dev loop (menubar app, unsigned)
 ```
 
@@ -27,7 +28,7 @@ Detection path — `SessionScanner.swift`, all pure/blocking, called off-main vi
 1. **Live-session registry (the source of truth)** — Claude Code maintains one JSON status file per running process at `~/.claude/sessions/<pid>.json` with `pid`, `sessionId`, `cwd`, `name` (e.g. "claude-status-b3"), `startedAt`/`statusUpdatedAt` (epoch **ms**), and an authoritative `status`. The CLI's status enum (extracted from the 2.1.202 binary) is `["busy","shell","idle","waiting"]`, plus a `waitingFor` detail string. Mapping: busy→green work, shell→user running a `!` command, idle→at the prompt (NOT an alarm state), waiting→orange. Unknown/missing statuses read as idle — never a false alarm color. Files whose pid is dead (`kill(pid, 0)`) are crash leftovers, skipped. The rust app at `~/Documents/code/system-stats` (`src/claude.rs`) reads the same registry and was the reference for this.
 2. **Transcript garnish** — the transcript at `~/.claude/projects/<dashed-cwd>/<sessionId>.jsonl` (cwd flattens: every non-alphanumeric/`-` char becomes `-`) is tail-read only for `gitBranch` and mtime. State never comes from transcripts: a first cut inferred it from the last JSONL entry and couldn't distinguish "idle at prompt" from "waiting on permission" — don't regress to that.
 
-`SingleInstance.swift` (flock on `~/Library/Application Support/ClaudeStatus/instance.lock`) guards against duplicate menubar items, same rationale as ClaudeUsage. `--permission-hook`, `--install-hook`/`--uninstall-hook`, `--self-test`, and `--scan` dispatch at the top of `App.main`, before NSApplication or the lock.
+`SingleInstance.swift` (flock on `~/Library/Application Support/ClaudeStatus/instance.lock`) guards against duplicate menubar items, same rationale as ClaudeUsage. `--permission-hook`, `--install-hook`/`--uninstall-hook`, `--self-test`, `--scan`, and `--focus <pid>` dispatch at the top of `App.main`, before NSApplication or the lock.
 
 ## Remote approval (the PermissionRequest hook bridge)
 
@@ -40,6 +41,15 @@ When a session hits a permission prompt, the user can approve/deny it from the o
 **The terminal prompt and our buttons are live simultaneously** — the CLI renders its prompt while the PermissionRequest hook is still running, and whichever side answers first wins. That requires reconciliation for the terminal-wins case: while the prompt is up, the session's registry status reads `waiting`; answering it flips the status (usually to `busy`) with a fresh `statusUpdatedAt`. Each poll, `reconcilePendingWithRegistry()` drops any pending approval whose session left `waiting` with a status change newer than the approval's arrival, and closes its helper connection via `server.cancel(id)` — a verdict-less shutdown (distinct from `respond`) so we never answer a question the terminal already settled. The predicate (`resolvedInTerminal`) is deliberately conservative: the pre-prompt `busy` state has a *stale* `statusUpdatedAt`, so it can't false-trigger at arrival.
 
 The overlay renders Approve / Deny / `⋯` **in place of the status text** on the affected row, with the command summary where the timing caption goes. The `⋯` menu holds "Approve all for 5 minutes" and "Approve all for this session" — per-session auto-approve rules held in memory only (deliberately not persisted; a standing approval shouldn't outlive the app that granted it), pruned when they expire or the session ends, and marked with a yellow bolt on the row.
+
+## Click-to-focus (raising the session's terminal)
+
+Clicking a row brings that session's terminal to the front (`TerminalFocus.swift`, wired through `SessionsView.onFocusSession` → `AppDelegate.focusTerminal`, which closes the panel first and runs the focus off-main on a serial queue). Two tiers:
+
+1. **Emulator adapters**, chosen by the bundle id of the nearest ancestor of the session pid that LaunchServices knows as an app (`hostApp`, a sysctl `ppid` walk: claude → zsh → login → Ghostty). **Ghostty 1.3+** has an AppleScript dictionary but exposes no pid/tty, so surfaces are matched on working directory plus the tab title Claude Code sets — the transcript's newest `ai-title` entry, which the scanner now reads alongside `gitBranch` and the store carries forward (`ClaudeSession.title`). Match order: cwd + title, title alone, cwd alone, else fall through. One list round-trip (`ghosttyListScript`), the pick in Swift (`pickGhosttyTerminal`, tested), then `focus terminal id "…"`. **Terminal.app** and **iTerm2** expose a `tty` per tab/session, matched to the pid's controlling tty (`ttyPath`, via `kinfo_proc.e_tdev` + `devname`).
+2. **Generic fallback**: activate the host app (`NSRunningApplication.activate()`, then `NSWorkspace.openApplication` with `activates` — the cooperative `activate()` can be refused because our panel is non-activating). Right app, whatever tab it was on. Kitty/WezTerm/tmux adapters would slot in beside the others when needed.
+
+Apple events require the `NSAppleEventsUsageDescription` key (in `build-app.sh`'s plist) and a one-time Automation grant per target app. **Ad-hoc signing re-prompts after every rebuild** because TCC keys the grant to the code signature — set `SIGN_IDENTITY` in `.env` for a stable identity. `swift run` (unbundled) gets no prompt and is denied silently, so test this path with the installed `.app`. `--scan` prints each session's `host=` bundle id and `title=` so the matching inputs are inspectable.
 
 ## Testing — hand-rolled, on purpose
 
