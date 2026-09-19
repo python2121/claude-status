@@ -15,6 +15,16 @@ if [[ -f .env ]]; then
   set -a; . ./.env; set +a
 fi
 
+# The Command Line Tools cannot compile SwiftUI's `@State` (a macro whose
+# plugin ships only in Xcode, as of the macOS 27 SDK). Use `@ViewState` from
+# Sources/ClaudeStatus/ViewState.swift instead. This check keeps a machine
+# that happens to have Xcode from reintroducing it.
+if grep -rnE '^[^/]*@State([^A-Za-z0-9_]|$)' Sources/ >/dev/null; then
+  echo "error: '@State' does not build with the Command Line Tools; use '@ViewState' (see Sources/ClaudeStatus/ViewState.swift):" >&2
+  grep -rnE '^[^/]*@State([^A-Za-z0-9_]|$)' Sources/ >&2
+  exit 1
+fi
+
 echo "==> swift build -c ${CONFIG}"
 swift build -c "${CONFIG}"
 

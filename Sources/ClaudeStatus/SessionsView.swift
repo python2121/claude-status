@@ -1,8 +1,9 @@
+import Combine
 import SwiftUI
 
 struct SessionsView: View {
     @ObservedObject var store: SessionStore
-    @State private var now: Date = Date()
+    @ViewState private var now: Date = Date()
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 

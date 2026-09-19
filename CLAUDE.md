@@ -47,6 +47,7 @@ The overlay renders Approve / Deny / `⋯` **in place of the status text** on th
 
 ## Things to know before editing
 
+- **Never use `@State`; use `@ViewState`** (`ViewState.swift`). Since the macOS 27 SDK, `@State` is a macro backed by `libSwiftUIMacros.dylib`, which ships only inside Xcode — this machine has Command Line Tools only, so `@State` fails with "plugin for module 'SwiftUIMacros' not found" plus a cascade of "'self' is immutable" errors. `@ViewState` wraps the still-present `State<Value>` struct and behaves like the classic property wrapper (`$binding` works). `build-app.sh` rejects any `@State` in `Sources/`. `@Binding`, `@ObservedObject`, `@StateObject`, `@Environment`, and friends are still plain wrappers and fine. Also `import Combine` explicitly in files using `Timer.publish`/`onReceive` — Swift 6.4 warns when it's only reached through SwiftUI.
 - `LSUIElement=true` in `Info.plist` (built inline in `build-app.sh`) plus `setActivationPolicy(.accessory)` keep the app out of the Dock. Don't remove either.
 - Signing is best-effort: `SIGN_IDENTITY` from `.env` if the cert exists, else ad-hoc. Unlike ClaudeUsage there are no keychain ACLs at stake, so ad-hoc is fine here.
 - The overlay's row order is stable (cwd, then pid) so rows don't jump between 2 s polls — state is conveyed by color, not position. Keep it stable.
