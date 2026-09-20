@@ -45,9 +45,28 @@ struct ClaudeStatusMain {
                 let since = s.stateSince.map { StatusFormat.compactAge(since: $0) } ?? "?"
                 let host = TerminalFocus.hostApp(of: s.pid)?.bundleIdentifier ?? "-"
                 print("pid=\(s.pid) [\(state) for \(since)] \(s.name ?? s.projectName) (\(s.gitBranch ?? "-")) \(s.cwd)")
-                print("    host=\(host) title=\(s.title.map { "\"\($0)\"" } ?? "-")")
+                print("    host=\(host) group=\(s.host.map { "\"\($0.label)\"" } ?? "-") title=\(s.title.map { "\"\($0)\"" } ?? "-")")
             }
             print("\(sessions.count) session(s), \(sessions.filter { $0.state == .waitingForInput }.count) waiting")
+            exit(0)
+        }
+
+        // `--host <pid>`: show which app the ancestor walk picks for any pid,
+        // and every app it saw on the way — for debugging new emulators.
+        if let i = CommandLine.arguments.firstIndex(of: "--host") {
+            guard i + 1 < CommandLine.arguments.count, let pid = Int32(CommandLine.arguments[i + 1]) else {
+                FileHandle.standardError.write(Data("usage: ClaudeStatus --host <pid>\n".utf8))
+                exit(2)
+            }
+            var current = pid
+            while let parent = TerminalFocus.parentPid(of: current), parent > 1 {
+                if let app = NSRunningApplication(processIdentifier: parent), let id = app.bundleIdentifier {
+                    print("  ancestor \(parent): \(id) policy=\(app.activationPolicy.rawValue) (\(app.localizedName ?? "?"))")
+                }
+                current = parent
+            }
+            let host = TerminalFocus.hostApp(of: pid)
+            print("host=\(host?.bundleIdentifier ?? "-") pid=\(host?.processIdentifier ?? 0)")
             exit(0)
         }
 
@@ -58,10 +77,11 @@ struct ClaudeStatusMain {
                 FileHandle.standardError.write(Data("usage: ClaudeStatus --focus <pid>\n".utf8))
                 exit(2)
             }
-            guard let session = SessionScanner.scan().first(where: { $0.pid == pid }) else {
-                FileHandle.standardError.write(Data("no live session with pid \(pid)\n".utf8))
-                exit(1)
-            }
+            // Any pid works: a non-session pid gets a bare record (no cwd/title),
+            // enough to exercise the tty- and pid-based adapters.
+            let session = SessionScanner.scan().first(where: { $0.pid == pid }) ?? ClaudeSession(
+                pid: pid, cwd: "?", name: nil, sessionId: nil, gitBranch: nil, title: nil, host: nil,
+                state: .idle, waitingFor: nil, lastActivity: nil, stateSince: nil, startedAt: nil)
             print("host=\(TerminalFocus.hostApp(of: pid)?.bundleIdentifier ?? "-") title=\(session.title ?? "-")")
             print("outcome=\(TerminalFocus.focus(session))")
             exit(0)

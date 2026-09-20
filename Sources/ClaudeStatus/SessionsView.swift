@@ -12,7 +12,7 @@ struct SessionsView: View {
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 9) {
             header
 
             Divider()
@@ -27,7 +27,8 @@ struct SessionsView: View {
 
             footer
         }
-        .padding(14)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .frame(width: 392, alignment: .leading)
         .onReceive(tick) { now = $0 }
     }
@@ -62,23 +63,126 @@ struct SessionsView: View {
             .padding(.vertical, 4)
     }
 
+    /// Two levels: host app (Ghostty, VS Code, …) then, for VS Code, the
+    /// window; sessions sit inside. The app header only appears once there's
+    /// more than one app — a single-host setup stays flat. A window header
+    /// carries the path when every session in it shares one, and sessions in
+    /// the same window aren't separated by lines; separate windows are.
     private var sessionRows: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(store.sessions.enumerated()), id: \.element.id) { index, session in
-                if index > 0 { Divider() }
-                clickableRow(for: session)
+        let hosts = Self.grouped(store.sessions)
+        let headed = hosts.count > 1
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(hosts.enumerated()), id: \.element.key) { hostIndex, host in
+                if hostIndex > 0 { Divider() }
+                VStack(alignment: .leading, spacing: 6) {
+                    if headed { hostHeader(host) }
+                    ForEach(Array(host.windows.enumerated()), id: \.element.key) { windowIndex, window in
+                        if windowIndex > 0 { Divider() }
+                        VStack(alignment: .leading, spacing: 6) {
+                            if window.label != nil { windowHeader(window) }
+                            ForEach(Array(window.sessions.enumerated()), id: \.element.id) { index, session in
+                                // No window label means each session is its
+                                // own window (Ghostty tabs, an unreported VS
+                                // Code window): keep the line between them.
+                                if index > 0 && window.label == nil { Divider() }
+                                // Inside a window group the window header already
+                                // names the project, so the row leads with the
+                                // conversation summary instead.
+                                clickableRow(for: session,
+                                             showPath: !(window.label != nil && window.sharedPath != nil),
+                                             leadWithTitle: window.label != nil,
+                                             compact: window.label != nil && window.sessions.count > 1)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    /// The whole row is a click target that raises the session's terminal;
-    /// the Approve/Deny/⋯ controls inside keep their own taps (child
-    /// gestures win). Hover tints the row and shows the pointing hand, same
-    /// affordance as the approval pills. The padding-in/padding-out pair
-    /// draws the highlight slightly larger than the content without
-    /// shifting the layout.
-    private func clickableRow(for session: ClaudeSession) -> some View {
-        row(for: session)
+    private func hostHeader(_ host: HostGroup) -> some View {
+        Text(host.label.uppercased())
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .tracking(0.6)
+            .lineLimit(1)
+            .truncationMode(.middle)
+    }
+
+    /// The window's name in the row-title weight, its path beneath — the same
+    /// shape as a row's name + path, so the eye reads it as "the project".
+    private func windowHeader(_ window: WindowGroup) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(window.label ?? "")
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let path = window.sharedPath {
+                Text(abbreviatedPath(path))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    struct WindowGroup: Equatable {
+        var key: String
+        /// VS Code window label; nil for hosts without windows we can see.
+        var label: String?
+        var sessions: [ClaudeSession]
+
+        /// The one working directory every session in the window runs in, or
+        /// nil when they differ (then each row shows its own).
+        var sharedPath: String? {
+            let cwds = Set(sessions.map(\.cwd))
+            return cwds.count == 1 ? cwds.first : nil
+        }
+    }
+
+    struct HostGroup: Equatable {
+        var key: String
+        var label: String
+        var windows: [WindowGroup]
+    }
+
+    /// Stable grouping: hosts by label ("Other" last), windows by label
+    /// (unlabeled last), sessions inside keep the scanner's (cwd, pid) order.
+    static func grouped(_ sessions: [ClaudeSession]) -> [HostGroup] {
+        var hosts: [HostGroup] = []
+        for session in sessions {
+            let hostKey = session.host?.bundleId ?? "~other"
+            let hostLabel = session.host?.appName ?? "Other"
+            let windowLabel = session.host?.window
+            let windowKey = windowLabel ?? "~none"
+            let h: Int
+            if let i = hosts.firstIndex(where: { $0.key == hostKey }) {
+                h = i
+            } else {
+                hosts.append(HostGroup(key: hostKey, label: hostLabel, windows: []))
+                h = hosts.count - 1
+            }
+            if let w = hosts[h].windows.firstIndex(where: { $0.key == windowKey }) {
+                hosts[h].windows[w].sessions.append(session)
+            } else {
+                hosts[h].windows.append(WindowGroup(key: windowKey, label: windowLabel, sessions: [session]))
+            }
+        }
+        for i in hosts.indices {
+            hosts[i].windows.sort { a, b in
+                if (a.label == nil) != (b.label == nil) { return b.label == nil }
+                return (a.label ?? "") < (b.label ?? "")
+            }
+        }
+        return hosts.sorted { a, b in
+            if (a.key == "~other") != (b.key == "~other") { return b.key == "~other" }
+            return (a.label, a.key) < (b.label, b.key)
+        }
+    }
+
+    private func clickableRow(for session: ClaudeSession, showPath: Bool = true, leadWithTitle: Bool = false, compact: Bool = false) -> some View {
+        row(for: session, showPath: showPath, leadWithTitle: leadWithTitle, compact: compact)
             .padding(.horizontal, 6)
             .padding(.vertical, 5)
             .background(
@@ -101,18 +205,26 @@ struct SessionsView: View {
             .help("Bring this session's terminal to the front")
     }
 
-    private func row(for session: ClaudeSession) -> some View {
+    /// `leadWithTitle`: the bold line is the conversation summary ("TBD"
+    /// until Claude Code has written one) and the italic title line is
+    /// dropped — used under a window header that already names the project.
+    /// `compact`: several sessions share that window, so the bold line steps
+    /// down a size to read as items under the header rather than peers of it.
+    private func row(for session: ClaudeSession, showPath: Bool = true, leadWithTitle: Bool = false, compact: Bool = false) -> some View {
         let effectiveState = store.effectiveState(session)
+        let title = session.title.flatMap { $0.isEmpty ? nil : $0 }
         return HStack(alignment: .top, spacing: 8) {
             Circle()
                 .fill(stateColor(effectiveState))
                 .frame(width: 8, height: 8)
                 .padding(.top, 5)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(session.projectName)
-                        .font(.system(size: 14, weight: .semibold))
+                    Text(leadWithTitle ? (title ?? "TBD") : session.projectName)
+                        .font(.system(size: compact ? 12.5 : 14, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     if store.hasAutoApprove(session) {
                         Image(systemName: "bolt.fill")
                             .font(.caption2)
@@ -120,16 +232,29 @@ struct SessionsView: View {
                             .help("Auto-approving permission requests for this session")
                     }
                 }
+                if showPath {
+                    Text(abbreviatedPath(session.cwd))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                // The conversation title Claude Code generates (the transcript's
+                // `ai-title`) — the cheapest way to tell two sessions in one
+                // project apart.
+                if !leadWithTitle, let title {
+                    Text(title)
+                        .font(.caption)
+                        .italic()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
                 if let branch = session.gitBranch, !branch.isEmpty {
                     Label(branch, systemImage: "arrow.triangle.branch")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text(abbreviatedPath(session.cwd))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
             }
 
             Spacer()
@@ -140,7 +265,7 @@ struct SessionsView: View {
             if let approval = store.firstPending(for: session) {
                 approvalControls(for: approval, in: session)
             } else {
-                VStack(alignment: .trailing, spacing: 3) {
+                VStack(alignment: .trailing, spacing: 2) {
                     Text(stateText(session))
                         .font(.callout)
                         .foregroundStyle(stateColor(session.state))

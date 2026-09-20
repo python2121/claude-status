@@ -55,6 +55,26 @@ if ! codesign --verify --verbose=1 "${DEST}" >/dev/null 2>&1; then
   exit 1
 fi
 
+# VS Code bridge extension (vendored in vscode-extension/): lets a row click
+# select the exact integrated terminal a session runs in. Packaged here as a
+# .vsix (zip + manifest, no npm) and installed through each editor's own CLI;
+# editors that aren't installed are skipped. SKIP_VSCODE_EXT=1 opts out.
+# Open editor windows pick up a new version after a reload.
+if [[ "${SKIP_VSCODE_EXT:-0}" != "1" ]]; then
+  VSIX="$(vscode-extension/pack.sh .build)"
+  for cli in \
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+    "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders" \
+    "/Applications/Cursor.app/Contents/Resources/app/bin/cursor" \
+    "/Applications/VSCodium.app/Contents/Resources/app/bin/codium"; do
+    [[ -x "${cli}" ]] || continue
+    echo "==> installing VS Code bridge extension via $(basename "${cli}")"
+    if ! "${cli}" --install-extension "${VSIX}" --force >/dev/null 2>&1; then
+      echo "WARNING: bridge extension install failed for ${cli}" >&2
+    fi
+  done
+fi
+
 # Register the PermissionRequest hook in ~/.claude/settings.json so approvals
 # can be answered from the app. Idempotent (only touches its own marked
 # entry, prints "Nothing to do" when already present). SKIP_HOOK=1 to opt

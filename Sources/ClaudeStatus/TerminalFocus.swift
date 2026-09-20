@@ -11,9 +11,15 @@ import Foundation
 ///    plus the tab title Claude Code sets (the transcript's `ai-title`
 ///    entry). Terminal.app and iTerm2 expose a `tty`, matched against the
 ///    session pid's controlling terminal.
-/// 2. **Generic fallback** — the nearest ancestor of the session pid that is
-///    a bundled app is activated (VS Code, Kitty, WezTerm, anything). Right
-///    app, whatever tab it was on.
+/// 2. **VS Code bridge** — VS Code has no scripting for terminals, so a
+///    vendored extension (`vscode-extension/`) runs in every window and
+///    watches a request file; the window owning the terminal whose shell pid
+///    is in the session's ancestor chain selects it and replies with its
+///    workspace path, which we hand to the editor's own CLI to raise that
+///    window. Also covers Cursor / Insiders / VSCodium.
+/// 3. **Generic fallback** — the nearest ancestor of the session pid that is
+///    a bundled app is activated (Kitty, WezTerm, anything). Right app,
+///    whatever tab it was on.
 ///
 /// Apple events need `NSAppleEventsUsageDescription` in Info.plist and a
 /// one-time Automation grant per target app (TCC). A denied, failing, or
@@ -26,6 +32,7 @@ enum TerminalFocus {
         case ghostty
         case terminalApp
         case iterm
+        case vscode
         case generic
     }
 
@@ -34,6 +41,9 @@ enum TerminalFocus {
         case "com.mitchellh.ghostty": return .ghostty
         case "com.apple.Terminal": return .terminalApp
         case "com.googlecode.iterm2": return .iterm
+        case "com.microsoft.VSCode", "com.microsoft.VSCodeInsiders",
+             "com.todesktop.230313mzl4w4u92" /* Cursor */, "com.vscodium":
+            return .vscode
         default: return .generic
         }
     }
@@ -49,14 +59,14 @@ enum TerminalFocus {
     static func focus(_ session: ClaudeSession) -> Outcome {
         guard let app = hostApp(of: session.pid) else { return .noHostApp }
         let adapter = adapter(forBundleId: app.bundleIdentifier)
-        if focusExactTerminal(session, adapter: adapter) {
+        if focusExactTerminal(session, adapter: adapter, app: app) {
             return .focusedTerminal(adapter)
         }
         activate(app)
         return .activatedApp(app.bundleIdentifier ?? "?")
     }
 
-    private static func focusExactTerminal(_ session: ClaudeSession, adapter: Adapter) -> Bool {
+    private static func focusExactTerminal(_ session: ClaudeSession, adapter: Adapter, app: NSRunningApplication) -> Bool {
         switch adapter {
         case .ghostty:
             guard let terminals = ghosttyTerminals(),
@@ -69,6 +79,8 @@ enum TerminalFocus {
         case .iterm:
             guard let tty = ttyPath(of: session.pid) else { return false }
             return runScript(itermScript(tty: tty)) == "ok"
+        case .vscode:
+            return focusVSCodeTerminal(session, app: app)
         case .generic:
             return false
         }
@@ -208,6 +220,193 @@ enum TerminalFocus {
          .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
+    // MARK: VS Code (bridge extension)
+
+    /// Shared with the extension (see `vscode-extension/extension.js`):
+    /// `request.json` from us, `reply.json` from the owning window.
+    static var vscodeBridgeDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/ClaudeStatus/vscode-focus", isDirectory: true)
+    }
+
+    struct VSCodeReply: Equatable {
+        var nonce: String
+        /// `.code-workspace` file or first folder of the owning window; nil
+        /// for an untitled window (nothing for the CLI to raise by).
+        var workspace: String?
+        var terminal: String?
+    }
+
+    static func vscodeRequest(nonce: String, pids: [pid_t], cwd: String, sessionId: String?, now: Date) -> Data {
+        var obj: [String: Any] = [
+            "ts": Int(now.timeIntervalSince1970 * 1000),
+            "nonce": nonce,
+            "pids": pids.map { Int($0) },
+            "cwd": cwd,
+        ]
+        if let sessionId { obj["sessionId"] = sessionId }
+        return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
+    }
+
+    static func parseVSCodeReply(_ data: Data, nonce: String) -> VSCodeReply? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["nonce"] as? String == nonce else { return nil }
+        let workspace = (obj["workspace"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return VSCodeReply(nonce: nonce, workspace: workspace, terminal: obj["terminal"] as? String)
+    }
+
+    /// The pid plus every ancestor below launchd. The extension matches
+    /// `Terminal.processId` (the shell) against this, so it doesn't matter
+    /// how many layers sit between claude and the shell.
+    static func ancestorPids(of pid: pid_t, limit: Int = 16) -> [pid_t] {
+        var chain = [pid]
+        var current = pid
+        for _ in 0..<limit {
+            guard let parent = parentPid(of: current), parent > 1 else { break }
+            chain.append(parent)
+            current = parent
+        }
+        return chain
+    }
+
+    /// Drop the request atomically (temp + rename, so the watcher never sees
+    /// a partial file) and poll for the owning window's reply. nil on
+    /// timeout: extension not installed, remote window, or no window owns
+    /// the terminal — the caller falls back to activating the app.
+    static func bridgeVSCode(pids: [pid_t], cwd: String, sessionId: String?,
+                             dir: URL = vscodeBridgeDir, deadline: TimeInterval = 1.5) -> VSCodeReply? {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let request = dir.appendingPathComponent("request.json")
+        let reply = dir.appendingPathComponent("reply.json")
+        try? fm.removeItem(at: reply)
+        let nonce = UUID().uuidString
+        let tmp = dir.appendingPathComponent("request.json.\(nonce).tmp")
+        let body = vscodeRequest(nonce: nonce, pids: pids, cwd: cwd, sessionId: sessionId, now: Date())
+        guard (try? body.write(to: tmp)) != nil, rename(tmp.path, request.path) == 0 else { return nil }
+        let end = Date().addingTimeInterval(deadline)
+        while Date() < end {
+            if let data = try? Data(contentsOf: reply), let got = parseVSCodeReply(data, nonce: nonce) {
+                return got
+            }
+            usleep(50_000)
+        }
+        return nil
+    }
+
+    // MARK: VS Code window state (row grouping)
+
+    /// What each VS Code window publishes to `windows/<id>.json` (see the
+    /// extension): which shell pids its terminals run, and what to call it.
+    struct VSCodeWindowState: Equatable {
+        var name: String?
+        var workspace: String?
+        var terminalPids: [pid_t]
+        var ts: Date
+
+        /// Workspace name, else the folder's last component, else untitled.
+        var label: String {
+            if let name, !name.isEmpty { return name }
+            if let workspace, !workspace.isEmpty { return (workspace as NSString).lastPathComponent }
+            return "untitled window"
+        }
+    }
+
+    static var vscodeWindowsDir: URL { vscodeBridgeDir.appendingPathComponent("windows", isDirectory: true) }
+
+    static func parseVSCodeWindowState(_ data: Data) -> VSCodeWindowState? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ts = obj["ts"] as? Double else { return nil }
+        let pids = (obj["terminals"] as? [[String: Any]])?.compactMap { ($0["pid"] as? Int).map { pid_t($0) } } ?? []
+        return VSCodeWindowState(
+            name: obj["name"] as? String,
+            workspace: obj["workspace"] as? String,
+            terminalPids: pids,
+            ts: Date(timeIntervalSince1970: ts / 1000))
+    }
+
+    /// Every window's state, minus files older than `maxAge` (the extension
+    /// heartbeats every 30 s; a crashed window's file just ages out).
+    static func loadVSCodeWindows(dir: URL = vscodeWindowsDir, now: Date = Date(), maxAge: TimeInterval = 90) -> [VSCodeWindowState] {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return [] }
+        return files
+            .filter { $0.pathExtension == "json" }
+            .compactMap { (try? Data(contentsOf: $0)).flatMap(parseVSCodeWindowState) }
+            .filter { now.timeIntervalSince($0.ts) <= maxAge }
+    }
+
+    static func vscodeWindow(owning pids: [pid_t], in windows: [VSCodeWindowState]) -> VSCodeWindowState? {
+        let wanted = Set(pids)
+        return windows.first { !wanted.isDisjoint(with: $0.terminalPids) }
+    }
+
+    // MARK: Host (for grouping rows)
+
+    /// Nicer than `localizedName` where the app's own name is a bare "Code".
+    static func displayName(forBundleId id: String?, fallback: String) -> String {
+        switch id {
+        case "com.microsoft.VSCode": return "VS Code"
+        case "com.microsoft.VSCodeInsiders": return "VS Code Insiders"
+        case "com.todesktop.230313mzl4w4u92": return "Cursor"
+        case "com.vscodium": return "VSCodium"
+        case "com.apple.Terminal": return "Terminal"
+        default: return fallback
+        }
+    }
+
+    /// The session's host app and, for VS Code, its window. `windows` is
+    /// loaded once per scan and passed in so a poll reads the state files once.
+    static func host(of pid: pid_t, windows: [VSCodeWindowState]) -> SessionHost? {
+        guard let app = hostApp(of: pid), let bundleId = app.bundleIdentifier else { return nil }
+        let name = displayName(forBundleId: bundleId, fallback: app.localizedName ?? bundleId)
+        var window: String?
+        if adapter(forBundleId: bundleId) == .vscode {
+            window = vscodeWindow(owning: ancestorPids(of: pid), in: windows)?.label
+        }
+        return SessionHost(bundleId: bundleId, appName: name, window: window)
+    }
+
+    /// Each editor ships its CLI inside the bundle; `<cli> <folder>` focuses
+    /// the window that already has that folder open instead of opening one.
+    static func cliName(forBundleId id: String?) -> String {
+        switch id {
+        case "com.microsoft.VSCodeInsiders": return "code-insiders"
+        case "com.todesktop.230313mzl4w4u92": return "cursor"
+        case "com.vscodium": return "codium"
+        default: return "code"
+        }
+    }
+
+    static func cliURL(for app: NSRunningApplication) -> URL? {
+        guard let bundle = app.bundleURL else { return nil }
+        let url = bundle.appendingPathComponent("Contents/Resources/app/bin/\(cliName(forBundleId: app.bundleIdentifier))")
+        return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
+    }
+
+    private static func focusVSCodeTerminal(_ session: ClaudeSession, app: NSRunningApplication) -> Bool {
+        guard let reply = bridgeVSCode(pids: ancestorPids(of: session.pid), cwd: session.cwd, sessionId: session.sessionId)
+        else { return false }
+        // The tab is selected by now; raise its window. No workspace (untitled
+        // window) or no CLI → plain activation, which is right for one window.
+        if let workspace = reply.workspace, let cli = cliURL(for: app), runCLI(cli, [workspace]) {
+            return true
+        }
+        activate(app)
+        return true
+    }
+
+    @discardableResult
+    private static func runCLI(_ url: URL, _ arguments: [String]) -> Bool {
+        let process = Process()
+        process.executableURL = url
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
     // MARK: AppleScript execution
 
     static func runScript(_ source: String) -> String? {
@@ -247,21 +446,33 @@ enum TerminalFocus {
         return "/dev/" + String(cString: name)
     }
 
-    /// Walk up from the session pid (claude → zsh → login → Ghostty, say) to
-    /// the first ancestor LaunchServices knows as an app. Shell and login
-    /// processes have no NSRunningApplication; helper processes of the
-    /// terminal generally don't either, so this lands on the main app.
+    /// Walk up from the session pid (claude → zsh → login → Ghostty, say)
+    /// collecting every ancestor LaunchServices knows as an app, then pick
+    /// the one worth activating. Shell and login processes have no
+    /// NSRunningApplication. Electron editors do have registered helpers in
+    /// the chain — VS Code's pty host is "Code Helper (Plugin)", an
+    /// LSUIElement bundle that shares the id `com.microsoft.VSCode.helper`
+    /// — and activating one of those does nothing visible, so the pick
+    /// prefers the first ancestor with a regular (Dock-visible) activation
+    /// policy and only settles for an accessory when nothing regular is above
+    /// it.
     static func hostApp(of pid: pid_t) -> NSRunningApplication? {
+        var apps: [NSRunningApplication] = []
         var current = pid
         for _ in 0..<16 {
-            guard let parent = parentPid(of: current), parent > 1 else { return nil }
+            guard let parent = parentPid(of: current), parent > 1 else { break }
             if parent != getpid(),
                let app = NSRunningApplication(processIdentifier: parent),
                app.bundleIdentifier != nil {
-                return app
+                apps.append(app)
             }
             current = parent
         }
-        return nil
+        return chooseHostIndex(policies: apps.map(\.activationPolicy)).map { apps[$0] }
+    }
+
+    /// Nearest regular app wins; otherwise the nearest app of any policy.
+    static func chooseHostIndex(policies: [NSApplication.ActivationPolicy]) -> Int? {
+        policies.firstIndex(of: .regular) ?? (policies.isEmpty ? nil : 0)
     }
 }

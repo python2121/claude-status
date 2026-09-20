@@ -267,7 +267,7 @@ enum SelfTest {
         t.expectEqual(TerminalFocus.adapter(forBundleId: "com.mitchellh.ghostty"), .ghostty, "focus: Ghostty adapter")
         t.expectEqual(TerminalFocus.adapter(forBundleId: "com.apple.Terminal"), .terminalApp, "focus: Terminal adapter")
         t.expectEqual(TerminalFocus.adapter(forBundleId: "com.googlecode.iterm2"), .iterm, "focus: iTerm adapter")
-        t.expectEqual(TerminalFocus.adapter(forBundleId: "com.microsoft.VSCode"), .generic, "focus: unknown app → generic")
+        t.expectEqual(TerminalFocus.adapter(forBundleId: "org.alacritty"), .generic, "focus: unknown app → generic")
         t.expectEqual(TerminalFocus.adapter(forBundleId: nil), .generic, "focus: nil bundle → generic")
 
         let surfaces = [
@@ -302,6 +302,115 @@ enum SelfTest {
         t.expectEqual(TerminalFocus.ghosttyFocusScript(terminalId: "X\"Y").contains(#"terminal id "X\"Y""#), true, "script: id embedded escaped")
         t.expectEqual(TerminalFocus.terminalAppScript(tty: "/dev/ttys004").contains(#"tty of t is "/dev/ttys004""#), true, "script: Terminal tty embedded")
         t.expectEqual(TerminalFocus.itermScript(tty: "/dev/ttys004").contains(#"tty of s is "/dev/ttys004""#), true, "script: iTerm tty embedded")
+
+        t.expectEqual(TerminalFocus.adapter(forBundleId: "com.microsoft.VSCode"), .vscode, "focus: VS Code adapter")
+        t.expectEqual(TerminalFocus.adapter(forBundleId: "com.todesktop.230313mzl4w4u92"), .vscode, "focus: Cursor adapter")
+        t.expectEqual(TerminalFocus.cliName(forBundleId: "com.microsoft.VSCode"), "code", "vscode: cli name")
+        t.expectEqual(TerminalFocus.cliName(forBundleId: "com.microsoft.VSCodeInsiders"), "code-insiders", "vscode: insiders cli name")
+        t.expectEqual(TerminalFocus.cliName(forBundleId: "com.todesktop.230313mzl4w4u92"), "cursor", "vscode: cursor cli name")
+
+        let reqData = TerminalFocus.vscodeRequest(nonce: "n-1", pids: [10, 20], cwd: "/w", sessionId: "s-1",
+                                                  now: Date(timeIntervalSince1970: 1_700_000_000.5))
+        let req = (try? JSONSerialization.jsonObject(with: reqData)) as? [String: Any]
+        t.expectEqual(req?["nonce"] as? String, "n-1", "vscode request: nonce")
+        t.expectEqual(req?["pids"] as? [Int], [10, 20], "vscode request: pids")
+        t.expectEqual(req?["ts"] as? Int, 1_700_000_000_500, "vscode request: epoch ms")
+        t.expectEqual(req?["cwd"] as? String, "/w", "vscode request: cwd")
+        t.expectEqual(req?["sessionId"] as? String, "s-1", "vscode request: sessionId")
+
+        let okReply = Data(#"{"nonce":"n-1","workspace":"/w/proj.code-workspace","terminal":"zsh","ts":1}"#.utf8)
+        t.expectEqual(TerminalFocus.parseVSCodeReply(okReply, nonce: "n-1"),
+                      TerminalFocus.VSCodeReply(nonce: "n-1", workspace: "/w/proj.code-workspace", terminal: "zsh"), "vscode reply: parsed")
+        t.expectNil(TerminalFocus.parseVSCodeReply(okReply, nonce: "other"), "vscode reply: nonce mismatch → nil")
+        t.expectEqual(TerminalFocus.parseVSCodeReply(Data(#"{"nonce":"n-1","workspace":null}"#.utf8), nonce: "n-1")?.workspace, nil, "vscode reply: untitled window → nil workspace")
+        t.expectEqual(TerminalFocus.parseVSCodeReply(Data(#"{"nonce":"n-1","workspace":""}"#.utf8), nonce: "n-1")?.workspace, nil, "vscode reply: empty workspace → nil")
+        t.expectNil(TerminalFocus.parseVSCodeReply(Data("garbage".utf8), nonce: "n-1"), "vscode reply: malformed → nil")
+
+        let winJSON = Data(#"{"ts":1700000000000,"name":"claude-status","workspace":"/w/claude-status","terminals":[{"pid":501,"name":"zsh"},{"pid":502,"name":"✳ Claude Code"},{"name":"starting"}]}"#.utf8)
+        let win = TerminalFocus.parseVSCodeWindowState(winJSON)
+        t.expectEqual(win?.terminalPids, [501, 502], "window state: pids (pid-less terminal skipped)")
+        t.expectEqual(win?.label, "claude-status", "window state: label from workspace name")
+        t.expectEqual(win?.ts, Date(timeIntervalSince1970: 1_700_000_000), "window state: epoch ms")
+        t.expectEqual(TerminalFocus.parseVSCodeWindowState(Data(#"{"ts":1,"workspace":"/w/proj","terminals":[]}"#.utf8))?.label, "proj", "window state: label falls back to folder name")
+        t.expectEqual(TerminalFocus.parseVSCodeWindowState(Data(#"{"ts":1,"terminals":[]}"#.utf8))?.label, "untitled window", "window state: untitled")
+        t.expectNil(TerminalFocus.parseVSCodeWindowState(Data(#"{"terminals":[]}"#.utf8)), "window state: no ts → nil")
+        let winA = TerminalFocus.VSCodeWindowState(name: "A", workspace: nil, terminalPids: [11, 12], ts: Date())
+        let winB = TerminalFocus.VSCodeWindowState(name: "B", workspace: nil, terminalPids: [21], ts: Date())
+        t.expectEqual(TerminalFocus.vscodeWindow(owning: [900, 21, 1], in: [winA, winB])?.name, "B", "window lookup: any pid in the chain")
+        t.expectNil(TerminalFocus.vscodeWindow(owning: [7], in: [winA, winB]), "window lookup: none → nil")
+        let winDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cs-windows-\(getpid())", isDirectory: true)
+        try? FileManager.default.removeItem(at: winDir)
+        try? FileManager.default.createDirectory(at: winDir, withIntermediateDirectories: true)
+        let fresh = Int(Date().timeIntervalSince1970 * 1000)
+        try? Data(#"{"ts":\#(fresh),"name":"fresh","terminals":[{"pid":1}]}"#.utf8).write(to: winDir.appendingPathComponent("a.json"))
+        try? Data(#"{"ts":\#(fresh - 600_000),"name":"stale","terminals":[{"pid":2}]}"#.utf8).write(to: winDir.appendingPathComponent("b.json"))
+        try? Data("junk".utf8).write(to: winDir.appendingPathComponent("c.json"))
+        t.expectEqual(TerminalFocus.loadVSCodeWindows(dir: winDir).map(\.name), ["fresh"], "window load: stale and junk files dropped")
+        t.expectEqual(TerminalFocus.loadVSCodeWindows(dir: winDir.appendingPathComponent("missing")).count, 0, "window load: missing dir → empty")
+        try? FileManager.default.removeItem(at: winDir)
+        t.expectEqual(TerminalFocus.displayName(forBundleId: "com.microsoft.VSCode", fallback: "Code"), "VS Code", "host name: VS Code")
+        t.expectEqual(TerminalFocus.displayName(forBundleId: "com.mitchellh.ghostty", fallback: "Ghostty"), "Ghostty", "host name: fallback")
+
+        func fakeSession(_ pid: pid_t, cwd: String, host: SessionHost?) -> ClaudeSession {
+            ClaudeSession(pid: pid, cwd: cwd, name: nil, sessionId: nil, gitBranch: nil, title: nil, host: host,
+                          state: .idle, waitingFor: nil, lastActivity: nil, stateSince: nil, startedAt: nil)
+        }
+        let vsA = SessionHost(bundleId: "com.microsoft.VSCode", appName: "VS Code", window: "alpha")
+        let vsB = SessionHost(bundleId: "com.microsoft.VSCode", appName: "VS Code", window: "beta")
+        let ghostty = SessionHost(bundleId: "com.mitchellh.ghostty", appName: "Ghostty", window: nil)
+        t.expectEqual(vsA.label, "VS Code · alpha", "host: window label")
+        t.expectEqual(ghostty.label, "Ghostty", "host: app-only label")
+        t.expectEqual(vsA.groupKey == vsB.groupKey, false, "host: windows group separately")
+        let grouped = SessionsView.grouped([
+            fakeSession(1, cwd: "/a", host: vsB),
+            fakeSession(2, cwd: "/b", host: ghostty),
+            fakeSession(3, cwd: "/c", host: nil),
+            fakeSession(4, cwd: "/d", host: vsA),
+            fakeSession(5, cwd: "/a", host: vsB),
+            fakeSession(6, cwd: "/f", host: SessionHost(bundleId: "com.microsoft.VSCode", appName: "VS Code", window: nil)),
+        ])
+        t.expectEqual(grouped.map(\.label), ["Ghostty", "VS Code", "Other"], "grouping: hosts by label, Other last")
+        t.expectEqual(grouped[1].windows.map(\.label), ["alpha", "beta", nil], "grouping: windows by label, unreported last")
+        t.expectEqual(grouped[1].windows[1].sessions.map(\.pid), [1, 5], "grouping: rows keep scan order inside a window")
+        t.expectEqual(grouped[1].windows[1].sharedPath, "/a", "grouping: shared cwd → path on the window")
+        t.expectEqual(grouped[1].windows[0].sharedPath, "/d", "grouping: single row → its cwd is the window's")
+        t.expectNil(grouped[0].windows.first?.label, "grouping: Ghostty has no window level")
+        t.expectNil(SessionsView.grouped([fakeSession(1, cwd: "/a", host: vsB), fakeSession(2, cwd: "/z", host: vsB)])[0].windows[0].sharedPath, "grouping: mixed cwds in a window → no shared path")
+        t.expectEqual(SessionsView.grouped([]).count, 0, "grouping: empty")
+
+        let chain = TerminalFocus.ancestorPids(of: getpid())
+        t.expectEqual(chain.first, getpid(), "ancestors: starts with the pid itself")
+        t.expectEqual(chain.contains(getppid()), true, "ancestors: includes the parent")
+        t.expectEqual(chain.contains(1), false, "ancestors: stops below launchd")
+
+        // Bridge round-trip against a fake extension: a thread watching the
+        // request file that answers with the request's nonce.
+        let bridgeDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cs-bridge-\(getpid())", isDirectory: true)
+        try? FileManager.default.removeItem(at: bridgeDir)
+        t.expectNil(TerminalFocus.bridgeVSCode(pids: [1], cwd: "/", sessionId: nil, dir: bridgeDir, deadline: 0.2), "bridge: no extension → nil after deadline")
+        Thread.detachNewThread {
+            let request = bridgeDir.appendingPathComponent("request.json")
+            for _ in 0..<100 {
+                if let data = try? Data(contentsOf: request),
+                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                   let nonce = obj["nonce"] as? String, (obj["pids"] as? [Int]) == [42, 43] {
+                    let reply = #"{"nonce":"\#(nonce)","workspace":"/fake/ws","terminal":"zsh"}"#
+                    try? Data(reply.utf8).write(to: bridgeDir.appendingPathComponent("reply.json"))
+                    return
+                }
+                usleep(10_000)
+            }
+        }
+        let bridged = TerminalFocus.bridgeVSCode(pids: [42, 43], cwd: "/x", sessionId: "s", dir: bridgeDir, deadline: 2)
+        t.expectEqual(bridged?.workspace, "/fake/ws", "bridge: reply from the owning window")
+        t.expectEqual(bridged?.terminal, "zsh", "bridge: terminal name carried")
+        try? FileManager.default.removeItem(at: bridgeDir)
+
+        t.expectEqual(TerminalFocus.chooseHostIndex(policies: [.regular]), 0, "host: lone regular app")
+        t.expectEqual(TerminalFocus.chooseHostIndex(policies: [.accessory, .regular]), 1, "host: skip helper, take the app above it")
+        t.expectEqual(TerminalFocus.chooseHostIndex(policies: [.prohibited, .accessory, .regular, .regular]), 2, "host: nearest regular, not the outermost")
+        t.expectEqual(TerminalFocus.chooseHostIndex(policies: [.accessory, .prohibited]), 0, "host: no regular app → nearest of any kind")
+        t.expectNil(TerminalFocus.chooseHostIndex(policies: []), "host: no apps in the chain → nil")
 
         t.expectEqual(TerminalFocus.parentPid(of: getpid()), getppid(), "proc: parent pid via sysctl")
         t.expectNil(TerminalFocus.parentPid(of: 999_999), "proc: dead pid → nil")

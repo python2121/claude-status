@@ -1,0 +1,14 @@
+{
+  "name": "claude-status-terminal-focus",
+  "displayName": "Claude Status Terminal Focus",
+  "description": "Lets the Claude Status menubar app bring the integrated terminal a Claude Code session runs in to the front.",
+  "version": "0.1.0",
+  "publisher": "claude-status",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "extensionKind": ["ui"],
+  "contributes": {}
+}

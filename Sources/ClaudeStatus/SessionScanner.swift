@@ -1,6 +1,20 @@
 import Darwin
 import Foundation
 
+/// Where a session's terminal lives — the host app and, for VS Code, the
+/// window (from the bridge extension's per-window state). Drives the
+/// overlay's row grouping.
+struct SessionHost: Equatable {
+    var bundleId: String
+    var appName: String
+    /// VS Code window label (workspace name); nil for other hosts, or for a
+    /// VS Code window whose extension hasn't published state.
+    var window: String?
+
+    var groupKey: String { window.map { "\(bundleId)#\($0)" } ?? bundleId }
+    var label: String { window.map { "\(appName) · \($0)" } ?? appName }
+}
+
 /// One live Claude Code session, from the live-session registry.
 struct ClaudeSession: Identifiable, Equatable {
     /// Claude Code's own session status enum (found in the CLI's registry
@@ -28,6 +42,8 @@ struct ClaudeSession: Identifiable, Equatable {
     /// newest `ai-title` entry). Used to pick the right Ghostty surface on
     /// click; carried forward like the branch.
     var title: String?
+    /// Host app / VS Code window, for grouping. nil when the walk finds no app.
+    var host: SessionHost?
     let state: State
     /// What the session is blocked on, when the CLI says (`waitingFor`).
     let waitingFor: String?
@@ -69,6 +85,8 @@ enum SessionScanner {
             at: sessionsRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         ) else { return [] }
 
+        // VS Code window state is read once per scan, not once per session.
+        let windows = TerminalFocus.loadVSCodeWindows()
         var sessions: [ClaudeSession] = []
         for file in entries where file.pathExtension == "json" {
             // Registry files are named <pid>.json; anything else isn't ours.
@@ -78,13 +96,13 @@ enum SessionScanner {
             else { continue }
             // A file whose pid is dead is a leftover from a crash — skip it.
             guard pidAlive(entry.pid) else { continue }
-            sessions.append(session(for: entry))
+            sessions.append(session(for: entry, windows: windows))
         }
         // Stable order so popover rows don't jump between polls.
         return sessions.sorted { ($0.cwd, $0.pid) < ($1.cwd, $1.pid) }
     }
 
-    private static func session(for entry: RegistryEntry) -> ClaudeSession {
+    private static func session(for entry: RegistryEntry, windows: [TerminalFocus.VSCodeWindowState]) -> ClaudeSession {
         var branch: String?
         var title: String?
         var mtime: Date?
@@ -105,6 +123,7 @@ enum SessionScanner {
             sessionId: entry.sessionId,
             gitBranch: branch,
             title: title,
+            host: TerminalFocus.host(of: entry.pid, windows: windows),
             state: state(fromStatus: entry.status),
             waitingFor: entry.waitingFor,
             lastActivity: mtime,
