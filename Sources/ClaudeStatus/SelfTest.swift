@@ -56,6 +56,15 @@ enum SelfTest {
         t.expectEqual(entry?.startedAt, Date(timeIntervalSince1970: 1783455271.121), "registry: startedAt epoch-ms")
         t.expectEqual(entry?.statusUpdatedAt, Date(timeIntervalSince1970: 1783457374.373), "registry: statusUpdatedAt")
         t.expectNil(entry?.waitingFor, "registry: waitingFor absent")
+        t.expectEqual(entry?.kind, "interactive", "registry: kind")
+        t.expectNil(entry?.jobId, "registry: jobId absent on interactive")
+
+        let bgEntry = SessionScanner.parseRegistryEntry(Data(#"{"pid":2,"kind":"bg","jobId":"a34398c4","sessionId":"a34398c4-12a2-4b54-aaac-edc6a5e935a6","status":"shell"}"#.utf8))
+        t.expectEqual(bgEntry?.kind, "bg", "registry: kind bg")
+        t.expectEqual(bgEntry?.jobId, "a34398c4", "registry: jobId")
+        t.expectEqual(SessionScanner.isBackground(kind: "bg"), true, "kind bg → background")
+        t.expectEqual(SessionScanner.isBackground(kind: "interactive"), false, "kind interactive → terminal")
+        t.expectEqual(SessionScanner.isBackground(kind: nil), false, "missing kind → terminal (older CLI)")
 
         let withWaiting = SessionScanner.parseRegistryEntry(
             Data(#"{"pid":1,"status":"waiting","waitingFor":"permission"}"#.utf8))
@@ -351,8 +360,10 @@ enum SelfTest {
         t.expectEqual(TerminalFocus.displayName(forBundleId: "com.microsoft.VSCode", fallback: "Code"), "VS Code", "host name: VS Code")
         t.expectEqual(TerminalFocus.displayName(forBundleId: "com.mitchellh.ghostty", fallback: "Ghostty"), "Ghostty", "host name: fallback")
 
-        func fakeSession(_ pid: pid_t, cwd: String, host: SessionHost?) -> ClaudeSession {
-            ClaudeSession(pid: pid, cwd: cwd, name: nil, sessionId: nil, gitBranch: nil, title: nil, host: host,
+        func fakeSession(_ pid: pid_t, cwd: String, host: SessionHost?, background: Bool = false,
+                         jobId: String? = nil, sessionId: String? = nil) -> ClaudeSession {
+            ClaudeSession(pid: pid, cwd: cwd, name: nil, sessionId: sessionId, gitBranch: nil, title: nil, host: host,
+                          isBackground: background, jobId: jobId,
                           state: .idle, waitingFor: nil, lastActivity: nil, stateSince: nil, startedAt: nil)
         }
         let vsA = SessionHost(bundleId: "com.microsoft.VSCode", appName: "VS Code", window: "alpha")
@@ -377,6 +388,34 @@ enum SelfTest {
         t.expectNil(grouped[0].windows.first?.label, "grouping: Ghostty has no window level")
         t.expectNil(SessionsView.grouped([fakeSession(1, cwd: "/a", host: vsB), fakeSession(2, cwd: "/z", host: vsB)])[0].windows[0].sharedPath, "grouping: mixed cwds in a window → no shared path")
         t.expectEqual(SessionsView.grouped([]).count, 0, "grouping: empty")
+
+        // MARK: background sessions
+
+        let bgGrouped = SessionsView.grouped([
+            fakeSession(1, cwd: "/c", host: nil),
+            fakeSession(2, cwd: "/b", host: nil, background: true, jobId: "aaaa1111"),
+            fakeSession(3, cwd: "/a", host: ghostty),
+            fakeSession(4, cwd: "/d", host: nil, background: true, jobId: "bbbb2222"),
+        ])
+        t.expectEqual(bgGrouped.map(\.label), ["Ghostty", "Background", "Other"], "grouping: Background between hosts and Other")
+        t.expectEqual(bgGrouped[1].key, SessionsView.backgroundKey, "grouping: background key")
+        t.expectEqual(bgGrouped[1].windows.count, 1, "grouping: background has no window level")
+        t.expectEqual(bgGrouped[1].windows[0].sessions.map(\.pid), [2, 4], "grouping: background rows keep scan order")
+        t.expectNil(bgGrouped[1].windows[0].label, "grouping: background rows are each their own window (divider between)")
+        t.expectEqual(SessionsView.grouped([fakeSession(9, cwd: "/z", host: nil, background: true)]).map(\.label), ["Background"], "grouping: lone background group")
+
+        t.expectEqual(fakeSession(1, cwd: "/", host: nil, background: true, jobId: "j").attachId, "j", "attachId: jobId wins")
+        t.expectEqual(fakeSession(1, cwd: "/", host: nil, background: true, sessionId: "a34398c4-12a2-4b54-aaac-edc6a5e935a6").attachId, "a34398c4", "attachId: falls back to sessionId prefix")
+        t.expectNil(fakeSession(1, cwd: "/", host: nil, background: true).attachId, "attachId: nothing to attach with")
+
+        t.expectEqual(TerminalFocus.attachTerminalBundleId(running: ["com.apple.Terminal", "com.mitchellh.ghostty"]), "com.mitchellh.ghostty", "attach: Ghostty preferred when running")
+        t.expectEqual(TerminalFocus.attachTerminalBundleId(running: ["com.googlecode.iterm2"]), "com.googlecode.iterm2", "attach: iTerm2 when running")
+        t.expectEqual(TerminalFocus.attachTerminalBundleId(running: []), "com.apple.Terminal", "attach: Terminal.app when nothing runs")
+        t.expectEqual(TerminalFocus.shellSingleQuoted("it's"), #"'it'\''s'"#, "shell quote: embedded apostrophe")
+        t.expectEqual(TerminalFocus.attachCommand(cwd: "/Users/a b/code", attachId: "a34398c4"),
+                      "cd '/Users/a b/code' && claude attach 'a34398c4'", "attach: command line")
+        t.expectEqual(TerminalFocus.ghosttyAttachScript(cwd: "/x", command: "cd '/x' && claude attach 'id'").contains(#"set initial input of cfg to "cd '/x' && claude attach 'id'" & linefeed"#), true, "attach: Ghostty script types the command")
+        t.expectEqual(TerminalFocus.terminalAppAttachScript(command: #"say "hi""#).contains(#"do script "say \"hi\"""#), true, "attach: Terminal.app script escapes quotes")
 
         let chain = TerminalFocus.ancestorPids(of: getpid())
         t.expectEqual(chain.first, getpid(), "ancestors: starts with the pid itself")

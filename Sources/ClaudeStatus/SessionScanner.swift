@@ -44,6 +44,14 @@ struct ClaudeSession: Identifiable, Equatable {
     var title: String?
     /// Host app / VS Code window, for grouping. nil when the walk finds no app.
     var host: SessionHost?
+    /// Registry `kind` is "bg": a detached session run by the Claude Code
+    /// daemon on its own pty (`claude --bg`, a fork with `--reply-on-resume`,
+    /// a claimed spare). It lives in no terminal — clicking it opens one and
+    /// runs `claude attach`.
+    let isBackground: Bool
+    /// The daemon's short id for a background session (`jobId`), what
+    /// `claude attach <id>` takes.
+    let jobId: String?
     let state: State
     /// What the session is blocked on, when the CLI says (`waitingFor`).
     let waitingFor: String?
@@ -56,6 +64,10 @@ struct ClaudeSession: Identifiable, Equatable {
 
     var id: pid_t { pid }
     var projectName: String { (cwd as NSString).lastPathComponent }
+    /// What to hand `claude attach`. The registry's jobId has always been the
+    /// first eight characters of the sessionId; fall back to that when the
+    /// field is missing so an older CLI still attaches.
+    var attachId: String? { jobId ?? sessionId.map { String($0.prefix(8)) } }
 }
 
 /// Finds running Claude Code sessions. The source of truth is the live
@@ -116,6 +128,7 @@ enum SessionScanner {
                 title = tail.aiTitle
             }
         }
+        let background = isBackground(kind: entry.kind)
         return ClaudeSession(
             pid: entry.pid,
             cwd: entry.cwd ?? "?",
@@ -123,7 +136,12 @@ enum SessionScanner {
             sessionId: entry.sessionId,
             gitBranch: branch,
             title: title,
-            host: TerminalFocus.host(of: entry.pid, windows: windows),
+            // A background session hangs off the daemon (reparented to launchd),
+            // so the ancestor walk finds nothing — skip it rather than risk a
+            // spurious host if the daemon were ever launched from an app.
+            host: background ? nil : TerminalFocus.host(of: entry.pid, windows: windows),
+            isBackground: background,
+            jobId: entry.jobId,
             state: state(fromStatus: entry.status),
             waitingFor: entry.waitingFor,
             lastActivity: mtime,
@@ -143,6 +161,9 @@ enum SessionScanner {
         var waitingFor: String?
         var startedAt: Date?
         var statusUpdatedAt: Date?
+        /// "interactive" for a terminal session, "bg" for a daemon-run one.
+        var kind: String?
+        var jobId: String?
     }
 
     static func parseRegistryEntry(_ data: Data) -> RegistryEntry? {
@@ -160,9 +181,15 @@ enum SessionScanner {
             status: obj["status"] as? String,
             waitingFor: obj["waitingFor"] as? String,
             startedAt: epochMS("startedAt"),
-            statusUpdatedAt: epochMS("statusUpdatedAt")
+            statusUpdatedAt: epochMS("statusUpdatedAt"),
+            kind: obj["kind"] as? String,
+            jobId: obj["jobId"] as? String
         )
     }
+
+    /// Only an explicit "bg" counts; a missing kind (older CLI) is a
+    /// terminal session, so the row keeps its click-to-focus behavior.
+    static func isBackground(kind: String?) -> Bool { kind == "bg" }
 
     /// Map the registry's status string to our state. Unknown/missing values
     /// read as idle — never a false alarm color.

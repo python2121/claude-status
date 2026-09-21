@@ -21,6 +21,13 @@ import Foundation
 ///    a bundled app is activated (Kitty, WezTerm, anything). Right app,
 ///    whatever tab it was on.
 ///
+/// A **background session** (registry `kind: "bg"`) runs under the Claude
+/// Code daemon on its own pty and has no terminal to raise. Its click opens a
+/// new window in the user's terminal — Ghostty, iTerm2 or Terminal.app,
+/// whichever is running, else Terminal.app — in the session's cwd, running
+/// `claude attach <jobId>`. The `claude` on the shell's PATH is used, since
+/// the command is typed into a normal login shell rather than exec'd.
+///
 /// Apple events need `NSAppleEventsUsageDescription` in Info.plist and a
 /// one-time Automation grant per target app (TCC). A denied, failing, or
 /// non-matching adapter falls through to the generic tier, never to nothing.
@@ -52,11 +59,16 @@ enum TerminalFocus {
         case focusedTerminal(Adapter)
         case activatedApp(String)
         case noHostApp
+        /// Opened a terminal window (bundle id) running `claude attach`.
+        case attachedBackground(String)
+        case noAttachId
+        case attachFailed(String)
     }
 
     // MARK: Entry point
 
     static func focus(_ session: ClaudeSession) -> Outcome {
+        if session.isBackground { return attachBackground(session) }
         guard let app = hostApp(of: session.pid) else { return .noHostApp }
         let adapter = adapter(forBundleId: app.bundleIdentifier)
         if focusExactTerminal(session, adapter: adapter, app: app) {
@@ -96,6 +108,88 @@ enum TerminalFocus {
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: config)
+    }
+
+    // MARK: Background sessions (open a terminal running `claude attach`)
+
+    static let ghosttyBundleId = "com.mitchellh.ghostty"
+    static let itermBundleId = "com.googlecode.iterm2"
+    static let terminalAppBundleId = "com.apple.Terminal"
+
+    /// Prefer a terminal the user already has open; Terminal.app is always
+    /// installed, so it's the last resort even when it isn't running.
+    static func attachTerminalBundleId(running: Set<String>) -> String {
+        for id in [ghosttyBundleId, itermBundleId, terminalAppBundleId] where running.contains(id) {
+            return id
+        }
+        return terminalAppBundleId
+    }
+
+    /// The line typed into the new shell, single-quoted for it.
+    static func attachCommand(cwd: String, attachId: String) -> String {
+        "cd \(shellSingleQuoted(cwd)) && claude attach \(shellSingleQuoted(attachId))"
+    }
+
+    static func shellSingleQuoted(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func attachBackground(_ session: ClaudeSession) -> Outcome {
+        guard let attachId = session.attachId, !attachId.isEmpty else { return .noAttachId }
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        let bundleId = attachTerminalBundleId(running: running)
+        let command = attachCommand(cwd: session.cwd, attachId: attachId)
+        let script: String
+        switch bundleId {
+        case ghosttyBundleId: script = ghosttyAttachScript(cwd: session.cwd, command: command)
+        case itermBundleId: script = itermAttachScript(command: command)
+        default: script = terminalAppAttachScript(command: command)
+        }
+        if runScript(script) == "ok" { return .attachedBackground(bundleId) }
+        // Ghostty/iTerm declined (Automation not granted, say): Terminal.app
+        // is the universal fallback, and its grant is a separate one.
+        if bundleId != terminalAppBundleId, runScript(terminalAppAttachScript(command: command)) == "ok" {
+            return .attachedBackground(terminalAppBundleId)
+        }
+        return .attachFailed(bundleId)
+    }
+
+    /// Ghostty 1.3+: a surface configuration carries the working directory
+    /// and text to type once the shell is up. The command isn't set as the
+    /// surface's `command` so the user's shell (and PATH) stays in charge and
+    /// Ctrl+Z out of `claude attach` lands in a normal prompt.
+    static func ghosttyAttachScript(cwd: String, command: String) -> String {
+        """
+        tell application id "\(ghosttyBundleId)"
+          set cfg to new surface configuration
+          set initial working directory of cfg to "\(appleScriptLiteral(cwd))"
+          set initial input of cfg to "\(appleScriptLiteral(command))" & linefeed
+          set w to new window with configuration cfg
+          activate
+          return "ok"
+        end tell
+        """
+    }
+
+    static func itermAttachScript(command: String) -> String {
+        """
+        tell application id "\(itermBundleId)"
+          set w to (create window with default profile)
+          tell current session of w to write text "\(appleScriptLiteral(command))"
+          activate
+          return "ok"
+        end tell
+        """
+    }
+
+    static func terminalAppAttachScript(command: String) -> String {
+        """
+        tell application id "\(terminalAppBundleId)"
+          do script "\(appleScriptLiteral(command))"
+          activate
+          return "ok"
+        end tell
+        """
     }
 
     // MARK: Ghostty

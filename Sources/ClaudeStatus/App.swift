@@ -44,7 +44,8 @@ struct ClaudeStatusMain {
                 }
                 let since = s.stateSince.map { StatusFormat.compactAge(since: $0) } ?? "?"
                 let host = TerminalFocus.hostApp(of: s.pid)?.bundleIdentifier ?? "-"
-                print("pid=\(s.pid) [\(state) for \(since)] \(s.name ?? s.projectName) (\(s.gitBranch ?? "-")) \(s.cwd)")
+                let bg = s.isBackground ? " bg=\(s.attachId ?? "?")" : ""
+                print("pid=\(s.pid) [\(state) for \(since)]\(bg) \(s.name ?? s.projectName) (\(s.gitBranch ?? "-")) \(s.cwd)")
                 print("    host=\(host) group=\(s.host.map { "\"\($0.label)\"" } ?? "-") title=\(s.title.map { "\"\($0)\"" } ?? "-")")
             }
             print("\(sessions.count) session(s), \(sessions.filter { $0.state == .waitingForInput }.count) waiting")
@@ -81,8 +82,9 @@ struct ClaudeStatusMain {
             // enough to exercise the tty- and pid-based adapters.
             let session = SessionScanner.scan().first(where: { $0.pid == pid }) ?? ClaudeSession(
                 pid: pid, cwd: "?", name: nil, sessionId: nil, gitBranch: nil, title: nil, host: nil,
+                isBackground: false, jobId: nil,
                 state: .idle, waitingFor: nil, lastActivity: nil, stateSince: nil, startedAt: nil)
-            print("host=\(TerminalFocus.hostApp(of: pid)?.bundleIdentifier ?? "-") title=\(session.title ?? "-")")
+            print("host=\(TerminalFocus.hostApp(of: pid)?.bundleIdentifier ?? "-") title=\(session.title ?? "-")\(session.isBackground ? " bg=\(session.attachId ?? "?")" : "")")
             print("outcome=\(TerminalFocus.focus(session))")
             exit(0)
         }

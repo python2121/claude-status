@@ -70,7 +70,9 @@ struct SessionsView: View {
     /// the same window aren't separated by lines; separate windows are.
     private var sessionRows: some View {
         let hosts = Self.grouped(store.sessions)
-        let headed = hosts.count > 1
+        // A background group is always headed, even alone: the header is what
+        // tells the user there's no terminal to look for.
+        let headed = hosts.count > 1 || hosts.contains { $0.key == Self.backgroundKey }
         return VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(hosts.enumerated()), id: \.element.key) { hostIndex, host in
                 if hostIndex > 0 { Divider() }
@@ -147,13 +149,18 @@ struct SessionsView: View {
         var windows: [WindowGroup]
     }
 
-    /// Stable grouping: hosts by label ("Other" last), windows by label
-    /// (unlabeled last), sessions inside keep the scanner's (cwd, pid) order.
+    static let backgroundKey = "~background"
+    static let otherKey = "~other"
+
+    /// Stable grouping: hosts by label, then "Background" (daemon-run
+    /// sessions with no terminal), then "Other" (hosts we couldn't resolve);
+    /// windows by label (unlabeled last); sessions inside keep the scanner's
+    /// (cwd, pid) order.
     static func grouped(_ sessions: [ClaudeSession]) -> [HostGroup] {
         var hosts: [HostGroup] = []
         for session in sessions {
-            let hostKey = session.host?.bundleId ?? "~other"
-            let hostLabel = session.host?.appName ?? "Other"
+            let hostKey = session.isBackground ? backgroundKey : (session.host?.bundleId ?? otherKey)
+            let hostLabel = session.isBackground ? "Background" : (session.host?.appName ?? "Other")
             let windowLabel = session.host?.window
             let windowKey = windowLabel ?? "~none"
             let h: Int
@@ -175,8 +182,15 @@ struct SessionsView: View {
                 return (a.label ?? "") < (b.label ?? "")
             }
         }
+        func tier(_ key: String) -> Int {
+            switch key {
+            case backgroundKey: return 1
+            case otherKey: return 2
+            default: return 0
+            }
+        }
         return hosts.sorted { a, b in
-            if (a.key == "~other") != (b.key == "~other") { return b.key == "~other" }
+            if tier(a.key) != tier(b.key) { return tier(a.key) < tier(b.key) }
             return (a.label, a.key) < (b.label, b.key)
         }
     }
@@ -202,7 +216,9 @@ struct SessionsView: View {
                 }
             }
             .onTapGesture { onFocusSession(session) }
-            .help("Bring this session's terminal to the front")
+            .help(session.isBackground
+                  ? "Open a terminal attached to this background session"
+                  : "Bring this session's terminal to the front")
     }
 
     /// `leadWithTitle`: the bold line is the conversation summary ("TBD"
